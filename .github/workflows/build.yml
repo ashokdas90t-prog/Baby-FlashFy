@@ -1,4 +1,4 @@
-name: Build FlashFy
+name: Build FlashFy - Single APK
 
 on:
   workflow_dispatch:
@@ -11,66 +11,79 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare folders
+      - name: Check input files
         run: |
-          rm -rf work output
-          mkdir -p work/base_extract
-          mkdir -p output
+          set -e
 
-          cp base.apk work/base-original.apk
+          test -f base.apk
+          test -f split_config.arm64_v8a.apk
+          test -f split_config.en.apk
+          test -f split_config.xxhdpi.apk
+          test -f bg.png
 
-          for f in split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk; do
-            if [ -f "$f" ]; then
-              cp "$f" work/
-            fi
-          done
+          mkdir -p work/apks work/base_extract output
 
-      - name: Replace flash ON image
+          cp base.apk work/apks/base.apk
+          cp split_config.arm64_v8a.apk work/apks/
+          cp split_config.en.apk work/apks/
+          cp split_config.xxhdpi.apk work/apks/
+
+      - name: Replace Flutter flash ON image
         run: |
+          set -e
+
           cd work/base_extract
+          unzip -q ../apks/base.apk
 
-          unzip -q ../base-original.apk
-
-          echo "Checking original APK..."
           test -f AndroidManifest.xml
           test -f assets/flutter_assets/assets/flash_on.png
 
-          echo "Replacing flash_on.png..."
-          cp ../../bg.png \
-            assets/flutter_assets/assets/flash_on.png
+          cp ../../bg.png assets/flutter_assets/assets/flash_on.png
 
-          echo "Checking modified APK files..."
-          test -f AndroidManifest.xml
           test -f assets/flutter_assets/assets/flash_on.png
 
-          echo "Creating modified base APK..."
-
-          # IMPORTANT:
-          # ZIP MUST be created from inside base_extract,
-          # so AndroidManifest.xml stays at APK root.
-          zip -q -r -0 ../base.apk .
-
+          # Recreate base.apk with AndroidManifest.xml at APK root.
           cd ..
+          rm -f apks/base.apk
 
-          rm -rf base_extract base-original.apk
+          cd base_extract
+          zip -q -r -0 ../apks/base.apk .
+          cd ../..
 
-          echo "Checking rebuilt APK..."
-          unzip -l base.apk | grep -E 'AndroidManifest.xml|flash_on.png'
+          echo "Modified base.apk ready."
 
-      - name: Find Android build tools
+      - name: Download APKEditor
         run: |
-          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
+          set -e
 
-          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+          URL=$(curl -fsSL \
+            https://api.github.com/repos/REAndroid/APKEditor/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' \
+            | head -n 1)
 
-          echo "Using:"
-          echo "$BUILD_TOOLS"
+          test -n "$URL"
 
-          test -x "$BUILD_TOOLS/zipalign"
-          test -x "$BUILD_TOOLS/apksigner"
+          echo "Downloading: $URL"
+          curl -fL "$URL" -o APKEditor.jar
+
+          java -jar APKEditor.jar -version
+
+      - name: Merge all split APKs into one APK
+        run: |
+          set -e
+
+          java -Xmx4g -jar APKEditor.jar m \
+            -i work/apks \
+            -o output/FlashFy-universal-unsigned.apk \
+            -clean-meta \
+            -f
+
+          test -f output/FlashFy-universal-unsigned.apk
 
       - name: Create signing key
         run: |
+          set -e
+
           keytool -genkeypair \
             -v \
             -keystore flashfy.keystore \
@@ -82,56 +95,50 @@ jobs:
             -keypass flashfy123 \
             -dname "CN=FlashFy, OU=FlashFy, O=FlashFy, C=US"
 
-      - name: Align APKs
+      - name: Locate Android build tools
         run: |
-          mkdir -p work/aligned
+          set -e
 
-          for apk in work/*.apk; do
-            name=$(basename "$apk")
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 -maxdepth 1 -type d \
+            | sort -V | tail -n 1)
 
-            echo "Aligning $name"
+          test -x "$BUILD_TOOLS/apksigner"
 
-            "$BUILD_TOOLS/zipalign" \
-              -f -p 4 \
-              "$apk" \
-              "work/aligned/$name"
-          done
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
 
-      - name: Sign APKs
+      - name: Sign single APK
         run: |
-          mkdir -p output
+          set -e
 
-          for apk in work/aligned/*.apk; do
-            name=$(basename "$apk")
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks flashfy.keystore \
+            --ks-key-alias flashfy \
+            --ks-pass pass:flashfy123 \
+            --key-pass pass:flashfy123 \
+            --out output/FlashFy-universal.apk \
+            output/FlashFy-universal-unsigned.apk
 
-            echo "Signing $name"
+          rm -f output/FlashFy-universal-unsigned.apk
 
-            "$BUILD_TOOLS/apksigner" sign \
-              --ks flashfy.keystore \
-              --ks-key-alias flashfy \
-              --ks-pass pass:flashfy123 \
-              --key-pass pass:flashfy123 \
-              --out "output/$name" \
-              "$apk"
-          done
-
-      - name: Verify APKs
+      - name: Verify final APK
         run: |
-          for apk in output/*.apk; do
-            echo "================================"
-            echo "VERIFYING: $apk"
-            echo "================================"
+          set -e
 
-            "$BUILD_TOOLS/apksigner" verify --verbose "$apk"
+          "$BUILD_TOOLS/apksigner" verify --verbose output/FlashFy-universal.apk
 
-            echo
-            echo "Checking AndroidManifest.xml:"
-            unzip -l "$apk" | grep "AndroidManifest.xml"
-          done
+          unzip -l output/FlashFy-universal.apk \
+            | grep 'AndroidManifest.xml'
 
-      - name: Upload modified APKs
+          unzip -l output/FlashFy-universal.apk \
+            | grep 'assets/flutter_assets/assets/flash_on.png'
+
+          echo "===== FINAL APK ====="
+          ls -lh output/FlashFy-universal.apk
+
+      - name: Upload single APK
         uses: actions/upload-artifact@v4
         with:
-          name: FlashFy-modified
-          path: output/*.apk
+          name: FlashFy-single-APK
+          path: output/FlashFy-universal.apk
           if-no-files-found: error
