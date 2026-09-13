@@ -22,6 +22,7 @@ jobs:
           test -f bg.png
 
           mkdir -p work/apks
+          mkdir -p work/merged_extract
           mkdir -p output
 
           cp base.apk work/apks/base.apk
@@ -38,12 +39,11 @@ jobs:
             -o APKEditor.jar
 
           test -s APKEditor.jar
+          ls -lh APKEditor.jar
 
       - name: Merge split APKs
         run: |
           set -e
-
-          echo "Merging original split APKs..."
 
           java -Xmx4g -jar APKEditor.jar m \
             -i work/apks \
@@ -53,64 +53,58 @@ jobs:
 
           test -s output/FlashFy-merged-unsigned.apk
 
-          echo "Merged APK created:"
+          echo "Merged APK:"
           ls -lh output/FlashFy-merged-unsigned.apk
 
-      - name: Replace flash ON image in FINAL merged APK
+      - name: Replace flash ON image in merged APK
         run: |
           set -e
 
-          rm -rf work/final_extract
-          mkdir -p work/final_extract
+          echo "Extracting merged APK..."
 
-          echo "Extracting FINAL merged APK..."
+          rm -rf work/merged_extract
+          mkdir -p work/merged_extract
 
-          cd work/final_extract
-          unzip -q ../..
+          unzip -q \
+            output/FlashFy-merged-unsigned.apk \
+            -d work/merged_extract
 
-          # The command above extracts repository files too, so extract
-          # the actual merged APK explicitly into a clean directory.
-          cd ../..
-          rm -rf work/final_extract
-          mkdir -p work/final_extract
+          test -f work/merged_extract/AndroidManifest.xml
 
-          unzip -q output/FlashFy-merged-unsigned.apk \
-            -d work/final_extract
+          TARGET="work/merged_extract/assets/flutter_assets/assets/flash_on.png"
 
-          test -f work/final_extract/AndroidManifest.xml
+          echo "Checking target:"
+          echo "$TARGET"
 
-          TARGET="work/final_extract/assets/flutter_assets/assets/flash_on.png"
-
-          echo "Checking target asset..."
           test -f "$TARGET"
 
-          echo "Replacing FINAL APK asset..."
+          echo "Replacing flash_on.png..."
 
           cp bg.png "$TARGET"
-
-          echo "Comparing hashes..."
 
           SOURCE_HASH=$(sha256sum bg.png | awk '{print $1}')
           TARGET_HASH=$(sha256sum "$TARGET" | awk '{print $1}')
 
-          echo "Source : $SOURCE_HASH"
-          echo "Target : $TARGET_HASH"
+          echo "Source hash: $SOURCE_HASH"
+          echo "Target hash: $TARGET_HASH"
 
           test "$SOURCE_HASH" = "$TARGET_HASH"
 
-          echo "Creating FINAL modified unsigned APK..."
+          echo "Creating modified APK..."
 
           rm -f output/FlashFy-merged-unsigned.apk
 
-          cd work/final_extract
+          cd work/merged_extract
 
-          zip -q -r -0 ../../output/FlashFy-final-unsigned.apk .
+          zip -q -r -0 \
+            ../../output/FlashFy-final-unsigned.apk \
+            .
 
           cd ../..
 
           test -s output/FlashFy-final-unsigned.apk
 
-          echo "Final asset replacement confirmed."
+          echo "Modified APK created."
 
       - name: Locate Android build tools
         run: |
@@ -127,6 +121,8 @@ jobs:
           test -x "$BUILD_TOOLS/apksigner"
 
           echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+
+          echo "Using $BUILD_TOOLS"
 
       - name: Create signing key
         run: |
@@ -170,11 +166,13 @@ jobs:
 
           rm -f output/FlashFy-aligned.apk
 
-      - name: Verify final APK and image
+          test -s output/FlashFy-universal.apk
+
+      - name: Verify final APK
         run: |
           set -e
 
-          echo "Verifying APK signature..."
+          echo "Verifying signature..."
 
           "$BUILD_TOOLS/apksigner" verify \
             --verbose \
@@ -193,21 +191,24 @@ jobs:
           rm -rf work/verify
           mkdir -p work/verify
 
-          unzip -q output/FlashFy-universal.apk -d work/verify
+          unzip -q \
+            output/FlashFy-universal.apk \
+            -d work/verify
 
           SOURCE_HASH=$(sha256sum bg.png | awk '{print $1}')
           FINAL_HASH=$(sha256sum \
             work/verify/assets/flutter_assets/assets/flash_on.png \
             | awk '{print $1}')
 
-          echo "bg.png hash       : $SOURCE_HASH"
-          echo "final asset hash  : $FINAL_HASH"
+          echo "bg.png hash: $SOURCE_HASH"
+          echo "Final image hash: $FINAL_HASH"
 
           test "$SOURCE_HASH" = "$FINAL_HASH"
 
           echo "======================================"
           echo "SUCCESS"
-          echo "Final APK contains the supplied image."
+          echo "The supplied bg.png is inside the"
+          echo "final FlashFy APK as flash_on.png."
           echo "======================================"
 
           ls -lh output/FlashFy-universal.apk
