@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check inputs and image format
+      - name: Check inputs and PNG
         run: |
           set -e
 
@@ -27,20 +27,33 @@ jobs:
             test -s "$f"
           done
 
-          echo "Files:"
           ls -lh base.apk split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk bg-fixed.png
 
-          echo "Image file type:"
+          echo "Image type:"
           file bg-fixed.png
 
           python3 - <<'PY'
-          from PIL import Image
-          im = Image.open("bg-fixed.png")
-          print("format =", im.format)
-          print("size   =", im.size)
-          print("mode   =", im.mode)
-          assert im.format == "PNG", "bg-fixed.png is not a real PNG"
-          assert im.size == (864, 1536), "Unexpected image dimensions"
+          import struct
+
+          p = "bg-fixed.png"
+          with open(p, "rb") as f:
+              sig = f.read(8)
+              assert sig == b"\x89PNG\r\n\x1a\n", "Not a valid PNG signature"
+
+              length = struct.unpack(">I", f.read(4))[0]
+              chunk = f.read(4)
+              assert chunk == b"IHDR", "PNG IHDR missing"
+
+              data = f.read(length)
+              width, height = struct.unpack(">II", data[:8])
+
+          print("PNG width :", width)
+          print("PNG height:", height)
+
+          assert width == 864, f"Unexpected width: {width}"
+          assert height == 1536, f"Unexpected height: {height}"
+
+          print("PNG CHECK: PASS")
           PY
 
       - name: Setup Java
@@ -52,18 +65,15 @@ jobs:
       - name: Download APKEditor 1.4.9
         run: |
           set -e
-
           curl -fL \
             "https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar" \
             -o APKEditor.jar
-
           test -s APKEditor.jar
           ls -lh APKEditor.jar
 
       - name: Prepare split APKs
         run: |
           set -e
-
           rm -rf work output
           mkdir -p work/apks output
 
@@ -85,44 +95,26 @@ jobs:
           test -s output/merged-unsigned.apk
           ls -lh output/merged-unsigned.apk
 
-      - name: Replace Flutter ON image with real PNG
+      - name: Replace Flutter ON image
         run: |
           set -e
 
           rm -rf work/merged
           mkdir -p work/merged
-
           unzip -q output/merged-unsigned.apk -d work/merged
 
           TARGET="work/merged/assets/flutter_assets/assets/flash_on.png"
-
           test -f "$TARGET"
 
-          echo "Before replacement:"
-          file "$TARGET"
-
           cp -f bg-fixed.png "$TARGET"
-
-          echo "After replacement:"
-          file "$TARGET"
-
-          python3 - <<'PY'
-          from PIL import Image
-          p = "work/merged/assets/flutter_assets/assets/flash_on.png"
-          im = Image.open(p)
-          print("Final embedded image:", im.format, im.size, im.mode)
-          assert im.format == "PNG"
-          assert im.size == (864, 1536)
-          PY
 
           SOURCE_HASH="$(sha256sum bg-fixed.png | awk '{print $1}')"
           TARGET_HASH="$(sha256sum "$TARGET" | awk '{print $1}')"
 
-          echo "Source PNG hash:   $SOURCE_HASH"
-          echo "Embedded hash:     $TARGET_HASH"
+          echo "Source hash : $SOURCE_HASH"
+          echo "Target hash : $TARGET_HASH"
 
           test "$SOURCE_HASH" = "$TARGET_HASH"
-
           echo "IMAGE REPLACEMENT: PASS"
 
       - name: Repack modified APK
@@ -130,7 +122,6 @@ jobs:
           set -e
 
           rm -f output/modified-unsigned.apk
-
           (
             cd work/merged
             zip -q -r -0 ../../output/modified-unsigned.apk .
@@ -144,11 +135,8 @@ jobs:
           set -e
 
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
-            -mindepth 1 \
-            -maxdepth 1 \
-            -type d \
-            | sort -V \
-            | tail -n 1)"
+            -mindepth 1 -maxdepth 1 -type d |
+            sort -V | tail -n 1)"
 
           test -x "$BUILD_TOOLS/zipalign"
           test -x "$BUILD_TOOLS/apksigner"
@@ -173,14 +161,13 @@ jobs:
         run: |
           set -e
 
-          "$BUILD_TOOLS/zipalign" \
-            -f -p 4 \
+          "$BUILD_TOOLS/zipalign" -f -p 4 \
             output/modified-unsigned.apk \
             output/aligned.apk
 
           "$BUILD_TOOLS/zipalign" -c -v 4 output/aligned.apk
 
-      - name: Sign
+      - name: Sign APK
         run: |
           set -e
 
@@ -194,7 +181,7 @@ jobs:
 
           test -s output/FlashFy-universal.apk
 
-      - name: FINAL verification
+      - name: Final verification
         run: |
           set -e
 
@@ -202,36 +189,21 @@ jobs:
 
           rm -rf work/final_check
           mkdir -p work/final_check
-
           unzip -q output/FlashFy-universal.apk -d work/final_check
 
           FINAL_IMAGE="work/final_check/assets/flutter_assets/assets/flash_on.png"
-
           test -f "$FINAL_IMAGE"
-
-          file "$FINAL_IMAGE"
-
-          python3 - <<'PY'
-          from PIL import Image
-          p = "work/final_check/assets/flutter_assets/assets/flash_on.png"
-          im = Image.open(p)
-          print("FINAL embedded image:", im.format, im.size, im.mode)
-          assert im.format == "PNG"
-          assert im.size == (864, 1536)
-          PY
 
           SOURCE_HASH="$(sha256sum bg-fixed.png | awk '{print $1}')"
           FINAL_HASH="$(sha256sum "$FINAL_IMAGE" | awk '{print $1}')"
 
-          echo "Source PNG hash: $SOURCE_HASH"
-          echo "Final APK image hash: $FINAL_HASH"
+          echo "Source hash: $SOURCE_HASH"
+          echo "Final hash : $FINAL_HASH"
 
           test "$SOURCE_HASH" = "$FINAL_HASH"
 
-          echo "======================================"
           echo "FINAL IMAGE CHECK: PASS"
           echo "FINAL APK CHECK: PASS"
-          echo "======================================"
 
           ls -lh output/FlashFy-universal.apk
 
