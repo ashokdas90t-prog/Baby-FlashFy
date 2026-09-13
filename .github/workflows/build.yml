@@ -1,89 +1,158 @@
-name: Build FlashFy - Final Single APK
+name: Build FlashFy - Baby Image
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "base.apk"
+      - "split_config.arm64_v8a.apk"
+      - "split_config.en.apk"
+      - "split_config.xxhdpi.apk"
+      - "bg.png"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Check input files
         run: |
           set -e
-          test -f base.apk
-          test -f split_config.arm64_v8a.apk
-          test -f split_config.en.apk
-          test -f split_config.xxhdpi.apk
-          test -f bg.png
-          mkdir -p work/apks work/merged output
-          cp base.apk work/apks/base.apk
-          cp split_config.arm64_v8a.apk work/apks/
-          cp split_config.en.apk work/apks/
-          cp split_config.xxhdpi.apk work/apks/
+          test -s base.apk
+          test -s split_config.arm64_v8a.apk
+          test -s split_config.en.apk
+          test -s split_config.xxhdpi.apk
+          test -s bg.png
+
+          echo "Input files:"
+          ls -lh \
+            base.apk \
+            split_config.arm64_v8a.apk \
+            split_config.en.apk \
+            split_config.xxhdpi.apk \
+            bg.png
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Download APKEditor
         run: |
           set -e
-          curl -fL https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar -o APKEditor.jar
+
+          curl -fL \
+            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar" \
+            -o APKEditor.jar
+
           test -s APKEditor.jar
-          java -jar APKEditor.jar -version
+
+          echo "APKEditor downloaded successfully:"
+          ls -lh APKEditor.jar
+
+      - name: Prepare split APKs
+        run: |
+          set -e
+
+          rm -rf work output
+          mkdir -p work/apks output
+
+          cp base.apk work/apks/
+          cp split_config.arm64_v8a.apk work/apks/
+          cp split_config.en.apk work/apks/
+          cp split_config.xxhdpi.apk work/apks/
+
+          echo "Split APKs prepared:"
+          ls -lh work/apks
 
       - name: Merge split APKs
         run: |
           set -e
+
           java -Xmx4g -jar APKEditor.jar m \
             -i work/apks \
             -o output/merged-unsigned.apk \
             -clean-meta \
             -f
+
           test -s output/merged-unsigned.apk
 
-      - name: Replace flash ON image
+          echo "Merged APK:"
+          ls -lh output/merged-unsigned.apk
+
+      - name: Replace Flash ON image
         run: |
           set -e
+
           rm -rf work/merged
           mkdir -p work/merged
+
           unzip -q output/merged-unsigned.apk -d work/merged
 
-          test -f work/merged/AndroidManifest.xml
-
           TARGET="work/merged/assets/flutter_assets/assets/flash_on.png"
+
           test -f "$TARGET"
 
+          echo "Original flash_on.png:"
+          file "$TARGET"
+          ls -lh "$TARGET"
+
+          echo "Replacing with bg.png..."
           cp -f bg.png "$TARGET"
 
           SOURCE_HASH="$(sha256sum bg.png | awk '{print $1}')"
           TARGET_HASH="$(sha256sum "$TARGET" | awk '{print $1}')"
 
-          echo "bg.png:       $SOURCE_HASH"
-          echo "flash_on.png: $TARGET_HASH"
+          echo "bg.png hash:          $SOURCE_HASH"
+          echo "flash_on.png hash:    $TARGET_HASH"
 
           test "$SOURCE_HASH" = "$TARGET_HASH"
 
-      - name: Rebuild modified APK
+          echo "Image replacement verified."
+
+      - name: Repack modified APK
         run: |
           set -e
+
           rm -f output/modified-unsigned.apk
-          cd work/merged
-          zip -q -r -0 ../../output/modified-unsigned.apk .
-          cd ../..
+
+          (
+            cd work/merged
+            zip -q -r -0 ../../output/modified-unsigned.apk .
+          )
+
           test -s output/modified-unsigned.apk
 
-      - name: Locate Android build tools
+          echo "Modified unsigned APK:"
+          ls -lh output/modified-unsigned.apk
+
+      - name: Find Android build tools
         run: |
           set -e
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -n 1)"
+
+          test -n "$BUILD_TOOLS"
           test -x "$BUILD_TOOLS/zipalign"
           test -x "$BUILD_TOOLS/apksigner"
+
           echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+          echo "Using build tools: $BUILD_TOOLS"
 
       - name: Create signing key
         run: |
           set -e
+
           keytool -genkeypair -v \
             -keystore flashfy.keystore \
             -alias flashfy \
@@ -94,17 +163,27 @@ jobs:
             -keypass flashfy123 \
             -dname "CN=FlashFy, OU=FlashFy, O=FlashFy, C=US"
 
-      - name: Zipalign
+          test -s flashfy.keystore
+
+      - name: Zipalign APK
         run: |
           set -e
-          "$BUILD_TOOLS/zipalign" -f -p 4 \
+
+          "$BUILD_TOOLS/zipalign" \
+            -f \
+            -p \
+            4 \
             output/modified-unsigned.apk \
             output/aligned.apk
+
           test -s output/aligned.apk
+
+          "$BUILD_TOOLS/zipalign" -c -v 4 output/aligned.apk
 
       - name: Sign APK
         run: |
           set -e
+
           "$BUILD_TOOLS/apksigner" sign \
             --ks flashfy.keystore \
             --ks-key-alias flashfy \
@@ -112,17 +191,14 @@ jobs:
             --key-pass pass:flashfy123 \
             --out output/FlashFy-universal.apk \
             output/aligned.apk
+
           test -s output/FlashFy-universal.apk
 
-      - name: Final verification
+      - name: Verify final APK
         run: |
           set -e
 
-          "$BUILD_TOOLS/apksigner" verify --verbose \
-            output/FlashFy-universal.apk
-
-          unzip -l output/FlashFy-universal.apk | grep -F "AndroidManifest.xml"
-          unzip -l output/FlashFy-universal.apk | grep -F "assets/flutter_assets/assets/flash_on.png"
+          "$BUILD_TOOLS/apksigner" verify --verbose output/FlashFy-universal.apk
 
           rm -rf work/final_check
           mkdir -p work/final_check
@@ -130,17 +206,19 @@ jobs:
           unzip -q output/FlashFy-universal.apk -d work/final_check
 
           FINAL_IMAGE="work/final_check/assets/flutter_assets/assets/flash_on.png"
+
           test -f "$FINAL_IMAGE"
 
           SOURCE_HASH="$(sha256sum bg.png | awk '{print $1}')"
           FINAL_HASH="$(sha256sum "$FINAL_IMAGE" | awk '{print $1}')"
 
-          echo "Source bg.png: $SOURCE_HASH"
-          echo "Final image:  $FINAL_HASH"
+          echo "Final bg.png hash:        $SOURCE_HASH"
+          echo "Final flash_on.png hash: $FINAL_HASH"
 
           test "$SOURCE_HASH" = "$FINAL_HASH"
 
-          echo "SUCCESS: bg.png is inside the final APK as flash_on.png."
+          echo "FINAL APK IMAGE CHECK: PASS"
+          echo "Final APK:"
           ls -lh output/FlashFy-universal.apk
 
       - name: Upload final APK
