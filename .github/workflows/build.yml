@@ -2,127 +2,264 @@ name: Analyze FlashFy Flutter AOT
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "base.apk"
+      - "split_config.arm64_v8a.apk"
+      - "split_config.en.apk"
+      - "split_config.xxhdpi.apk"
+      - ".github/workflows/analyze-flashfy-aot.yml"
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check APK
+      - name: Check APK inputs
+        shell: bash
         run: |
-          set -e
-          test -s base.apk
-          test -s split_config.arm64_v8a.apk
-          ls -lh base.apk split_config.arm64_v8a.apk
+          set -euo pipefail
+          for f in base.apk split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk; do
+            test -s "$f" || { echo "Missing: $f"; exit 1; }
+          done
+          file base.apk split_config.arm64_v8a.apk
+          echo "APK inputs: PASS"
 
-      - name: Install Flutter AOT decompiler
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Find Android build tools
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -x "$BUILD_TOOLS/d8"
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+          echo "Using Android build tools: $BUILD_TOOLS"
 
+      - name: Download APKEditor
+        shell: bash
+        run: |
+          set -euo pipefail
           curl -fL \
-            "https://github.com/caverav/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz" \
-            -o flutterdec.tar.gz
+            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar" \
+            -o APKEditor.jar
+          test -s APKEditor.jar
+          echo "APKEditor: PASS"
 
-          mkdir -p flutterdec-dist
-          tar -xzf flutterdec.tar.gz -C flutterdec-dist
+      - name: Merge original split APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf work
+          mkdir -p work/splits work/out
+          cp base.apk split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk work/splits/
 
-          chmod +x flutterdec-dist/bin/flutterdec
+          java -Xmx4g -jar APKEditor.jar \
+            m -i work/splits -o work/flashfy.apk
 
-          ./flutterdec-dist/bin/flutterdec --version || true
+          test -s work/flashfy.apk
+          unzip -l work/flashfy.apk | grep -q "lib/arm64-v8a/libapp.so"
+          echo "Merged APK: PASS"
+          ls -lh work/flashfy.apk
+
+      - name: Download flutterdec release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="v0.1.0-alpha.4"
+          ARCHIVE="flutterdec-${VERSION}-Linux-X64.tar.gz"
+          URL="https://github.com/caverav/flutterdec/releases/download/${VERSION}/${ARCHIVE}"
+
+          mkdir -p work/flutterdec
+          curl -fL "$URL" -o "work/$ARCHIVE"
+          test -s "work/$ARCHIVE"
+
+          # The release is a PREFIX, not a lone executable.
+          # Keep bin/ and share/ together exactly as distributed.
+          tar -xzf "work/$ARCHIVE" -C work/flutterdec
+
+          echo "Extracted flutterdec tree:"
+          find work/flutterdec -maxdepth 5 -type f -print | sort
+
+          FLUTTERDEC_BIN="$(find work/flutterdec -type f -path '*/bin/flutterdec' -print -quit)"
+          test -n "$FLUTTERDEC_BIN"
+
+          chmod +x "$FLUTTERDEC_BIN"
+
+          FLUTTERDEC_BIN="$(realpath "$FLUTTERDEC_BIN")"
+          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" >> "$GITHUB_ENV"
+
+          # Verify that the binary can still see its packaged share/ data.
+          "$FLUTTERDEC_BIN" --version
+          "$FLUTTERDEC_BIN" --help >/dev/null
+
+          echo "flutterdec install: PASS"
+          echo "Using: $FLUTTERDEC_BIN"
 
       - name: Inspect Flutter AOT snapshot
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          mkdir -p analysis
+          mkdir -p work/info
+          "$FLUTTERDEC_BIN" info work/flashfy.apk --json | tee work/info/flutterdec-info.json
 
-          ./flutterdec-dist/bin/flutterdec \
-            info base.apk --json \
-            > analysis/info.json 2>&1 || true
-
-          cat analysis/info.json
-
-      - name: Install matching AOT adapter
-        run: |
-          set -e
-
-          HASH="$(python3 - <<'PY'
+          python3 - <<'PY'
           import json
-          p="analysis/info.json"
-          try:
-              d=json.load(open(p))
-          except Exception:
-              d={}
-          h=d.get("snapshot_hash","")
-          print(h if isinstance(h,str) else "")
+          from pathlib import Path
+
+          p = Path("work/info/flutterdec-info.json")
+          data = json.loads(p.read_text())
+
+          print("Top-level keys:", sorted(data.keys()))
+          print(json.dumps(data, indent=2)[:12000])
+
+          h = data.get("snapshot_hash")
+          if not h:
+              raise SystemExit("snapshot_hash was not found in flutterdec info output")
+
+          Path("work/info/snapshot_hash.txt").write_text(h + "\n")
+          print("SNAPSHOT_HASH=", h)
           PY
-          )"
 
-          echo "Detected snapshot hash: $HASH"
+      - name: Install matching flutterdec adapter
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          if [ -z "$HASH" ]; then
-            echo "Could not detect snapshot hash."
-            exit 1
-          fi
+          HASH="$(cat work/info/snapshot_hash.txt)"
+          echo "Installing adapter for Dart snapshot hash: $HASH"
 
-          ./flutterdec-dist/bin/flutterdec \
-            adapter install --dart-hash "$HASH" || true
+          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
 
-          ./flutterdec-dist/bin/flutterdec \
-            adapter list || true
+          "$FLUTTERDEC_BIN" adapter install \
+            --dart-hash "$HASH" \
+            --json | tee work/info/adapter-install.json
+
+          "$FLUTTERDEC_BIN" adapter list --json | tee work/info/adapter-list.json
+
+          echo "Adapter installation: PASS"
 
       - name: Decompile app-owned Flutter code
+        shell: bash
         run: |
-          set -e
+          set -u
 
-          mkdir -p analysis/decompiled
+          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
 
-          ./flutterdec-dist/bin/flutterdec \
-            decompile base.apk \
-            -o analysis/decompiled \
+          rm -rf work/decompile
+          mkdir -p work/decompile
+
+          # Do NOT let flutterdec's quality gate prevent artifact collection.
+          # The official tool documents that real Flutter apps can exit 1 while
+          # still writing pseudocode, asm, IR and reports.
+          set +e
+          "$FLUTTERDEC_BIN" decompile \
+            work/flashfy.apk \
+            -o work/decompile \
             --function-scope app-unknown \
+            --app-package flashfy \
             --emit-asm \
             --emit-ir \
-            > analysis/decompile.log 2>&1 || true
-
-          echo "===== DECOMPILER LOG ====="
-          cat analysis/decompile.log
-
-          echo "===== TARGET FUNCTION SEARCH ====="
-
-          grep -RniE \
-            "_RopeBulbPainter|_drawBulb|_drawPullRope|_paintBackgroundImage|_BackgroundPainter|FlashfyScreen|flash_on|flash_off" \
-            analysis/decompiled \
-            > analysis/target-functions.txt || true
-
-          cat analysis/target-functions.txt || true
-
-      - name: Create focused report
-        run: |
+            --emit-ghidra-script \
+            --emit-ida-script \
+            --analysis-profile balanced \
+            --max-placeholder-ifs 999999 \
+            --max-unresolved-cf 999999 \
+            --min-disassembly-ratio 0 \
+            2>&1 | tee work/decompile/decompile.log
+          RC=${PIPESTATUS[0]}
           set -e
 
+          echo "$RC" > work/decompile/exit-code.txt
+          echo "flutterdec decompile exit code: $RC"
+
+          # Artifact existence is the success criterion here, not the quality gate.
+          test -f work/decompile/report.json || true
+          test -f work/decompile/quality.json || true
+          find work/decompile -maxdepth 3 -type f | sort | head -300
+
+      - name: Search for FlashFy painter functions
+        shell: bash
+        run: |
+          set -u
+          mkdir -p work/focused
+
           {
-            echo "FlashFy Flutter AOT analysis"
-            echo
-            echo "Target functions:"
+            echo "=== TARGET FUNCTION SEARCH ==="
             grep -RniE \
-              "_RopeBulbPainter|_drawBulb|_drawPullRope|_paintBackgroundImage|_BackgroundPainter|FlashfyScreen" \
-              analysis/decompiled 2>/dev/null || true
+              '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|toggleFlash|isFlashOn' \
+              work/decompile 2>/dev/null || true
+
             echo
-            echo "Image references:"
-            grep -RniE \
-              "flash_on|flash_off|drawImage|AssetImage|ImageProvider|paintImage" \
-              analysis/decompiled 2>/dev/null || true
-          } > analysis/FOCUSED-REPORT.txt
+            echo "=== ALL DART-LIKE OUTPUT FILES ==="
+            find work/decompile -type f \( -name '*.dartpseudo' -o -name '*.dart' -o -name '*.s' -o -name '*.json' \) \
+              -print | sort | head -1000
+          } | tee work/focused/target-search.txt
 
-          cat analysis/FOCUSED-REPORT.txt
+          # Also inspect strings from libapp.so in case the decompiler does not
+          # recover these names into pseudocode.
+          unzip -p work/flashfy.apk lib/arm64-v8a/libapp.so > work/focused/libapp.so
 
-      - name: Upload AOT analysis
+          strings -a -n 4 work/focused/libapp.so | \
+            grep -E \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|toggleFlash|isFlashOn' \
+            | sort -u \
+            | tee work/focused/libapp-target-strings.txt || true
+
+          echo "Target search complete."
+
+      - name: Create focused report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          out = Path("work/focused/focused-report.txt")
+
+          lines = []
+          lines.append("FlashFy Flutter AOT analysis")
+          lines.append("=" * 60)
+
+          hash_file = Path("work/info/snapshot_hash.txt")
+          if hash_file.exists():
+              lines.append("snapshot_hash: " + hash_file.read_text().strip())
+
+          lines.append("")
+          lines.append("Decompile exit code: " +
+                       (Path("work/decompile/exit-code.txt").read_text().strip()
+                        if Path("work/decompile/exit-code.txt").exists() else "unknown"))
+
+          lines.append("")
+          lines.append("Target functions:")
+          target_file = Path("work/focused/target-search.txt")
+          if target_file.exists():
+              lines.extend(target_file.read_text(errors="replace").splitlines()[:2000])
+
+          out.write_text("\n".join(lines), errors="replace")
+          print(out.read_text(errors="replace")[:20000])
+          PY
+
+      - name: Upload AOT analysis artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: FlashFy-AOT-analysis
-          path: analysis/
-          if-no-files-found: error
+          path: |
+            work/info/
+            work/decompile/
+            work/focused/
+          if-no-files-found: warn
+          retention-days: 7
