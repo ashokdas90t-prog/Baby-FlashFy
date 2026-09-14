@@ -155,46 +155,39 @@ jobs:
           find work/flutterdec \
             -maxdepth 12 \
             -type f \
-            \( -name registry.json -o -name adapter_template.py -o -name flutterdec \) \
             -print \
             | sort
 
-          REGISTRY="$(
+          FLUTTERDEC_BIN="$(
             find work/flutterdec \
               -type f \
-              -path '*/adapters/registry.json' \
+              -name flutterdec \
               -print \
               -quit
           )"
 
-          TEMPLATE="$(
+          if [ -z "$FLUTTERDEC_BIN" ]; then
+            echo "ERROR: flutterdec executable not found."
+            exit 1
+          fi
+
+          FLUTTERDEC_BIN="$(realpath "$FLUTTERDEC_BIN")"
+
+          SHARE_DIR="$(
             find work/flutterdec \
               -type f \
-              -path '*/adapters/python/adapter_template.py' \
+              -path '*/share/flutterdec/adapters/registry.json' \
               -print \
-              -quit
+              -quit \
           )"
 
-          if [ -z "$REGISTRY" ]; then
-            echo "ERROR: matching release registry.json not found."
+          if [ -z "$SHARE_DIR" ]; then
+            echo "ERROR: release share/flutterdec/adapters/registry.json not found."
+            echo "The release archive must contain bin/flutterdec and share/flutterdec."
             exit 1
           fi
 
-          if [ -z "$TEMPLATE" ]; then
-            echo "ERROR: matching release adapter_template.py not found."
-            exit 1
-          fi
-
-          FLUTTERDEC_DATA_DIR="$(dirname "$(dirname "$REGISTRY")")"
-
-          echo "Release registry:"
-          echo "$REGISTRY"
-
-          echo "Release adapter template:"
-          echo "$TEMPLATE"
-
-          echo "FLUTTERDEC_DATA_DIR:"
-          echo "$FLUTTERDEC_DATA_DIR"
+          FLUTTERDEC_DATA_DIR="$(dirname "$(dirname "$(dirname "$SHARE_DIR")")")"
 
           test -f \
             "$FLUTTERDEC_DATA_DIR/adapters/registry.json"
@@ -205,10 +198,31 @@ jobs:
           test -d \
             "$FLUTTERDEC_DATA_DIR/data"
 
+          echo "Flutterdec binary:"
+          echo "$FLUTTERDEC_BIN"
+
+          echo "Flutterdec packaged data:"
+          echo "$FLUTTERDEC_DATA_DIR"
+
+          echo "Registry:"
+          ls -lh \
+            "$FLUTTERDEC_DATA_DIR/adapters/registry.json"
+
+          echo "Adapter template:"
+          ls -lh \
+            "$FLUTTERDEC_DATA_DIR/adapters/python/adapter_template.py"
+
+          echo "Runtime data:"
+          ls -ld \
+            "$FLUTTERDEC_DATA_DIR/data"
+
+          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" \
+            >> "$GITHUB_ENV"
+
           echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_DATA_DIR" \
             >> "$GITHUB_ENV"
 
-          echo "Matching flutterdec release data: PASS"
+          echo "Matching release data: PASS"
 
       - name: Inspect Flutter AOT snapshot
         shell: bash
@@ -287,6 +301,8 @@ jobs:
 
           test -n "$HASH"
 
+          rm -rf "$GITHUB_WORKSPACE/work/adapter-store"
+
           export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
 
           mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
@@ -318,6 +334,7 @@ jobs:
           set +e
 
           export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
+          export FLUTTERDEC_DATA_DIR="$FLUTTERDEC_DATA_DIR"
 
           rm -rf work/decompile
           mkdir -p work/decompile
