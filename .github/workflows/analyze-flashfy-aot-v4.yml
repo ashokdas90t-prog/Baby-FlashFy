@@ -145,88 +145,55 @@ jobs:
 
           echo "flutterdec binary: PASS"
 
-      - name: Checkout flutterdec source data
+      - name: Configure matching flutterdec release data
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf work/flutterdec-source
+          echo "=== FLUTTERDEC RELEASE TREE ==="
 
-          git clone \
-            --depth 1 \
-            --branch v0.1.0-alpha.4 \
-            https://github.com/caverav/flutterdec.git \
-            work/flutterdec-source
+          find work/flutterdec \
+            -maxdepth 12 \
+            -type f \
+            \( -name registry.json -o -name adapter_template.py -o -name flutterdec \) \
+            -print \
+            | sort
 
-          test -f \
-            work/flutterdec-source/adapters/registry.json
+          REGISTRY="$(
+            find work/flutterdec \
+              -type f \
+              -path '*/adapters/registry.json' \
+              -print \
+              -quit
+          )"
 
-          test -f \
-            work/flutterdec-source/adapters/python/adapter_template.py
+          TEMPLATE="$(
+            find work/flutterdec \
+              -type f \
+              -path '*/adapters/python/adapter_template.py' \
+              -print \
+              -quit
+          )"
 
-          test -d \
-            work/flutterdec-source/data
+          if [ -z "$REGISTRY" ]; then
+            echo "ERROR: matching release registry.json not found."
+            exit 1
+          fi
 
-          echo "=== FLUTTERDEC SOURCE VERSION ==="
+          if [ -z "$TEMPLATE" ]; then
+            echo "ERROR: matching release adapter_template.py not found."
+            exit 1
+          fi
 
-          git -C work/flutterdec-source describe --tags --always
-          git -C work/flutterdec-source rev-parse HEAD
+          FLUTTERDEC_DATA_DIR="$(dirname "$(dirname "$REGISTRY")")"
 
-          echo "flutterdec source data: PASS"
+          echo "Release registry:"
+          echo "$REGISTRY"
 
-          echo "Registry:"
-          ls -lh \
-            work/flutterdec-source/adapters/registry.json
+          echo "Release adapter template:"
+          echo "$TEMPLATE"
 
-          echo "Adapter template:"
-          ls -lh \
-            work/flutterdec-source/adapters/python/adapter_template.py
-
-      - name: Make flutterdec adapter files available
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf adapters data
-
-          cp -R \
-            work/flutterdec-source/adapters \
-            ./adapters
-
-          cp -R \
-            work/flutterdec-source/data \
-            ./data
-
-          test -f \
-            adapters/python/adapter_template.py
-
-          test -f \
-            adapters/registry.json
-
-          test -d \
-            data
-
-          echo "Adapter template:"
-          ls -lh \
-            adapters/python/adapter_template.py
-
-          echo "Registry:"
-          ls -lh \
-            adapters/registry.json
-
-          echo "flutterdec adapter files: PASS"
-
-      - name: Configure flutterdec data
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export FLUTTERDEC_DATA_DIR="$GITHUB_WORKSPACE"
-
-          echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_DATA_DIR" \
-            >> "$GITHUB_ENV"
-
-          echo "Configured flutterdec data directory:"
+          echo "FLUTTERDEC_DATA_DIR:"
           echo "$FLUTTERDEC_DATA_DIR"
 
           test -f \
@@ -238,7 +205,10 @@ jobs:
           test -d \
             "$FLUTTERDEC_DATA_DIR/data"
 
-          echo "flutterdec data configuration: PASS"
+          echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_DATA_DIR" \
+            >> "$GITHUB_ENV"
+
+          echo "Matching flutterdec release data: PASS"
 
       - name: Inspect Flutter AOT snapshot
         shell: bash
