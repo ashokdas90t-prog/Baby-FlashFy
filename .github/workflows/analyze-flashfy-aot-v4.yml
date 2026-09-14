@@ -55,8 +55,6 @@ jobs:
 
           test -s APKEditor.jar
 
-          echo "APKEditor: PASS"
-
       - name: Merge original split APKs
         shell: bash
         run: |
@@ -67,7 +65,8 @@ jobs:
             work/splits \
             work/info \
             work/decompile \
-            work/focused
+            work/focused \
+            work/native
 
           cp \
             base.apk \
@@ -108,50 +107,7 @@ jobs:
             "work/${ARCHIVE}" \
             -C work/flutterdec
 
-          echo "=== FLUTTERDEC FILES ==="
-
-          find work/flutterdec \
-            -maxdepth 10 \
-            -type f \
-            -print \
-            | sort
-
-          FLUTTERDEC_BIN="$(
-            find work/flutterdec \
-              -type f \
-              -name flutterdec \
-              -print \
-              -quit
-          )"
-
-          if [ -z "$FLUTTERDEC_BIN" ]; then
-            echo "ERROR: flutterdec executable not found."
-            exit 1
-          fi
-
-          chmod +x "$FLUTTERDEC_BIN"
-
-          FLUTTERDEC_BIN="$(realpath "$FLUTTERDEC_BIN")"
-
-          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" \
-            >> "$GITHUB_ENV"
-
-          echo "Using flutterdec:"
-          echo "$FLUTTERDEC_BIN"
-
-          "$FLUTTERDEC_BIN" --version
-
-          "$FLUTTERDEC_BIN" --help >/dev/null
-
-          echo "flutterdec binary: PASS"
-
-      - name: Configure matching flutterdec release data
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== FLUTTERDEC RELEASE TREE ==="
-
+          echo "=== RELEASE ARCHIVE TREE ==="
           find work/flutterdec \
             -maxdepth 12 \
             -type f \
@@ -171,65 +127,23 @@ jobs:
             exit 1
           fi
 
+          chmod +x "$FLUTTERDEC_BIN"
           FLUTTERDEC_BIN="$(realpath "$FLUTTERDEC_BIN")"
 
-          SHARE_DIR="$(
-            find work/flutterdec \
-              -type f \
-              -path '*/share/flutterdec/adapters/registry.json' \
-              -print \
-              -quit \
-          )"
+          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" >> "$GITHUB_ENV"
 
-          if [ -z "$SHARE_DIR" ]; then
-            echo "ERROR: release share/flutterdec/adapters/registry.json not found."
-            echo "The release archive must contain bin/flutterdec and share/flutterdec."
-            exit 1
-          fi
-
-          FLUTTERDEC_DATA_DIR="$(dirname "$(dirname "$(dirname "$SHARE_DIR")")")"
-
-          test -f \
-            "$FLUTTERDEC_DATA_DIR/adapters/registry.json"
-
-          test -f \
-            "$FLUTTERDEC_DATA_DIR/adapters/python/adapter_template.py"
-
-          test -d \
-            "$FLUTTERDEC_DATA_DIR/data"
-
-          echo "Flutterdec binary:"
+          echo "Using:"
           echo "$FLUTTERDEC_BIN"
 
-          echo "Flutterdec packaged data:"
-          echo "$FLUTTERDEC_DATA_DIR"
+          "$FLUTTERDEC_BIN" --version
+          "$FLUTTERDEC_BIN" --help >/dev/null
 
-          echo "Registry:"
-          ls -lh \
-            "$FLUTTERDEC_DATA_DIR/adapters/registry.json"
-
-          echo "Adapter template:"
-          ls -lh \
-            "$FLUTTERDEC_DATA_DIR/adapters/python/adapter_template.py"
-
-          echo "Runtime data:"
-          ls -ld \
-            "$FLUTTERDEC_DATA_DIR/data"
-
-          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" \
-            >> "$GITHUB_ENV"
-
-          echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_DATA_DIR" \
-            >> "$GITHUB_ENV"
-
-          echo "Matching release data: PASS"
+          echo "flutterdec binary: PASS"
 
       - name: Inspect Flutter AOT snapshot
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p work/info
 
           echo "=== FLUTTERDEC INFO ==="
 
@@ -252,7 +166,6 @@ jobs:
           for i, ch in enumerate(raw):
               if ch != "{":
                   continue
-
               try:
                   obj, _ = decoder.raw_decode(raw[i:])
                   if isinstance(obj, dict):
@@ -266,85 +179,69 @@ jobs:
               print(raw[:12000])
               raise SystemExit(1)
 
-          p.write_text(
-              json.dumps(data, indent=2) + "\n"
-          )
+          p.write_text(json.dumps(data, indent=2) + "\n")
 
           snapshot_hash = data.get("snapshot_hash")
+          print("SNAPSHOT_HASH:", snapshot_hash or "UNAVAILABLE")
 
-          if not snapshot_hash:
-              raise SystemExit(
-                  "snapshot_hash not found in flutterdec info"
+          if snapshot_hash:
+              Path("work/info/snapshot_hash.txt").write_text(
+                  snapshot_hash + "\n"
               )
-
-          Path(
-              "work/info/snapshot_hash.txt"
-          ).write_text(
-              snapshot_hash + "\n"
-          )
-
-          print(
-              "SNAPSHOT_HASH:",
-              snapshot_hash
-          )
+          else:
+              Path("work/info/snapshot_hash.txt").write_text(
+                  "UNAVAILABLE\n"
+              )
           PY
 
-      - name: Install matching flutterdec adapter
+      - name: Extract native Flutter library
         shell: bash
         run: |
           set -euo pipefail
 
-          HASH="$(
-            tr -d '\r\n ' \
-            < work/info/snapshot_hash.txt
-          )"
+          unzip -p \
+            work/flashfy.apk \
+            lib/arm64-v8a/libapp.so \
+            > work/native/libapp.so
 
-          test -n "$HASH"
+          test -s work/native/libapp.so
 
-          rm -rf "$GITHUB_WORKSPACE/work/adapter-store"
+          echo "=== ELF INFO ==="
+          file work/native/libapp.so
+          readelf -h work/native/libapp.so | tee work/native/readelf-header.txt
+          readelf -S work/native/libapp.so | tee work/native/readelf-sections.txt
 
-          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
+          echo "=== PAINTER STRING OFFSETS ==="
 
-          mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
+          strings -t x work/native/libapp.so \
+            | grep -E \
+              '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|toggleFlash|isFlashOn' \
+            | tee work/native/painter-string-offsets.txt \
+            || true
 
-          echo "Installing adapter for snapshot hash:"
-          echo "$HASH"
+          echo "=== ALL FLASHFY DART STRING REFERENCES ==="
 
-          test -f \
-            "$GITHUB_WORKSPACE/adapters/python/adapter_template.py"
+          strings -t x work/native/libapp.so \
+            | grep -E \
+              'flashfy_screen.dart|flashfy_controller.dart|torch_service.dart|FlashfyController|FlashfyScreen|toggleFlash|isFlashOn' \
+            | tee work/native/flashfy-string-offsets.txt \
+            || true
 
-          "$FLUTTERDEC_BIN" \
-            adapter install \
-            --dart-hash "$HASH" \
-            2>&1 \
-            | tee work/info/adapter-install.txt
-
-          echo "=== ADAPTER LIST ==="
-
-          "$FLUTTERDEC_BIN" \
-            adapter list \
-            2>&1 \
-            | tee work/info/adapter-list.txt
-
-          echo "Adapter installation: PASS"
-
-      - name: Decompile FlashFy Flutter code
+      - name: Decompile FlashFy with internal flutterdec backend
         shell: bash
         run: |
           set +e
 
-          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
-          export FLUTTERDEC_DATA_DIR="$FLUTTERDEC_DATA_DIR"
-
           rm -rf work/decompile
           mkdir -p work/decompile
 
-          echo "=== DECOMPILE ==="
+          echo "=== INTERNAL BACKEND DECOMPILE ==="
 
           "$FLUTTERDEC_BIN" \
             decompile \
             work/flashfy.apk \
             -o work/decompile \
+            --adapter-backend internal \
             --emit-asm \
             --emit-ir \
             2>&1 \
@@ -352,23 +249,20 @@ jobs:
 
           RC=${PIPESTATUS[0]}
 
-          echo "$RC" \
-            > work/decompile/exit-code.txt
+          echo "$RC" > work/decompile/exit-code.txt
 
           echo "flutterdec decompile exit code: $RC"
 
           echo "=== DECOMPILE FILES ==="
 
           find work/decompile \
-            -maxdepth 8 \
+            -maxdepth 10 \
             -type f \
             -print \
             | sort
 
-          echo "Decompile step completed."
-
-          # flutterdec may return non-zero because of quality gates
-          # even when useful analysis artifacts were produced.
+          # The CLI can return non-zero for quality-gate reasons while
+          # still leaving useful analysis artifacts. Do not hide the RC.
           exit 0
 
       - name: Search FlashFy painter functions
@@ -384,6 +278,7 @@ jobs:
             echo "========================================"
             echo
 
+            echo "=== flutterdec output ==="
             grep -RniE \
               '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|toggleFlash|isFlashOn' \
               work/decompile \
@@ -391,10 +286,19 @@ jobs:
               || true
 
             echo
-            echo "========================================"
-            echo "DART PSEUDO FILES"
-            echo "========================================"
+            echo "=== native libapp.so string offsets ==="
+            cat work/native/painter-string-offsets.txt \
+              2>/dev/null \
+              || true
 
+            echo
+            echo "=== FlashFy native strings ==="
+            cat work/native/flashfy-string-offsets.txt \
+              2>/dev/null \
+              || true
+
+            echo
+            echo "=== DART PSEUDO FILES ==="
             find work/decompile \
               -type f \
               -name '*.dartpseudo' \
@@ -402,10 +306,7 @@ jobs:
               | sort
 
             echo
-            echo "========================================"
-            echo "DART FILES"
-            echo "========================================"
-
+            echo "=== DART FILES ==="
             find work/decompile \
               -type f \
               -name '*.dart' \
@@ -413,10 +314,7 @@ jobs:
               | sort
 
             echo
-            echo "========================================"
-            echo "ASM FILES"
-            echo "========================================"
-
+            echo "=== ASM FILES ==="
             find work/decompile \
               -type f \
               -name '*.asm' \
@@ -424,10 +322,7 @@ jobs:
               | sort
 
             echo
-            echo "========================================"
-            echo "IR FILES"
-            echo "========================================"
-
+            echo "=== IR FILES ==="
             find work/decompile \
               -type f \
               -name '*.ir' \
@@ -435,18 +330,14 @@ jobs:
               | sort
 
             echo
-            echo "========================================"
-            echo "REPORT FILES"
-            echo "========================================"
-
+            echo "=== JSON REPORTS ==="
             find work/decompile \
               -type f \
               -name '*.json' \
               -print \
               | sort
 
-          } | tee \
-            work/focused/painter-search.txt
+          } | tee work/focused/painter-search.txt
 
       - name: Create focused report
         shell: bash
@@ -462,32 +353,18 @@ jobs:
             cat work/info/snapshot_hash.txt
 
             echo
-            echo "Adapter installation:"
-            cat work/info/adapter-install.txt \
-              || true
-
-            echo
-            echo "Adapter list:"
-            cat work/info/adapter-list.txt \
-              || true
-
-            echo
-            echo "Painter search:"
-            cat work/focused/painter-search.txt \
-              || true
+            echo "Flutterdec info:"
+            cat work/info/flutterdec-info.json
 
             echo
             echo "Decompile exit code:"
-            cat work/decompile/exit-code.txt \
-              || true
+            cat work/decompile/exit-code.txt
 
             echo
-            echo "Decompile log:"
-            cat work/decompile/decompile.log \
-              || true
+            echo "Painter/native analysis:"
+            cat work/focused/painter-search.txt
 
-          } > \
-            work/focused/FLASHFY-AOT-REPORT.txt
+          } | tee work/focused/REPORT.txt
 
       - name: Upload AOT analysis artifacts
         if: always()
@@ -495,8 +372,9 @@ jobs:
         with:
           name: FlashFy-AOT-analysis
           path: |
-            work/info/**
-            work/focused/**
-            work/decompile/**
+            work/info/
+            work/native/
+            work/decompile/
+            work/focused/
           if-no-files-found: warn
           retention-days: 7
