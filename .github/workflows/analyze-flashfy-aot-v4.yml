@@ -8,7 +8,7 @@ on:
       - "split_config.arm64_v8a.apk"
       - "split_config.en.apk"
       - "split_config.xxhdpi.apk"
-      - ".github/workflows/analyze-flashfy-aot.yml"
+      - ".github/workflows/analyze-flashfy-aot-v4.yml"
 
 jobs:
   analyze:
@@ -94,8 +94,6 @@ jobs:
           echo "=== EXTRACTED FLUTTERDEC FILES ==="
           find work/flutterdec -maxdepth 10 -type f -print | sort
 
-          # The GitHub runner archive used by this workflow currently extracts
-          # the executable as work/flutterdec/flutterdec, not bin/flutterdec.
           FLUTTERDEC_BIN="$(find work/flutterdec -type f -name flutterdec -print -quit)"
 
           if [ -z "$FLUTTERDEC_BIN" ]; then
@@ -110,9 +108,6 @@ jobs:
           echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" >> "$GITHUB_ENV"
           echo "Using flutterdec: $FLUTTERDEC_BIN"
 
-          # If packaged data exists beside the binary, point the CLI at it.
-          # If not, leave FLUTTERDEC_DATA_DIR unset because the flat release
-          # may resolve its data relative to the executable.
           REGISTRY="$(find work/flutterdec -type f \
             -path '*/share/flutterdec/adapters/registry.json' \
             -print -quit 2>/dev/null || true)"
@@ -149,8 +144,6 @@ jobs:
 
           echo "flutterdec info exit code: $RC"
 
-          # Extract the JSON object from the command output. This also tolerates
-          # diagnostic text printed before/after JSON.
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -205,10 +198,7 @@ jobs:
 
           "$FLUTTERDEC_BIN" adapter install \
             --dart-hash "$HASH" \
-            --json | tee work/info/adapter-install.json
-
-          "$FLUTTERDEC_BIN" adapter list --json \
-            | tee work/info/adapter-list.json
+            2>&1 | tee work/info/adapter-install.txt
 
           echo "Adapter installation: PASS"
 
@@ -228,14 +218,8 @@ jobs:
           "$FLUTTERDEC_BIN" decompile \
             work/flashfy.apk \
             -o work/decompile \
-            --function-scope app-unknown \
-            --app-package flashfy \
             --emit-asm \
             --emit-ir \
-            --analysis-profile balanced \
-            --max-placeholder-ifs 999999 \
-            --max-unresolved-cf 999999 \
-            --min-disassembly-ratio 0 \
             2>&1 | tee work/decompile/decompile.log
           RC=${PIPESTATUS[0]}
           set -e
@@ -246,8 +230,6 @@ jobs:
           echo "=== DECOMPILE FILES ==="
           find work/decompile -maxdepth 5 -type f -print | sort | head -1000
 
-          # A real Flutter app may trigger the quality gate and return 1 while
-          # still producing useful artifacts. Do not fail solely on that code.
           if ! find work/decompile -type f \
               \( -name '*.dartpseudo' -o -name '*.s' -o -name '*.json' \) \
               -print -quit | grep -q .; then
@@ -264,17 +246,27 @@ jobs:
 
           {
             echo "=== TARGET FUNCTION SEARCH ==="
+
             grep -RniE \
               '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|toggleFlash|isFlashOn' \
               work/decompile 2>/dev/null || true
 
             echo
             echo "=== DART-PSEUDO FILES ==="
-            find work/decompile -type f -name '*.dartpseudo' -print | sort
+
+            find work/decompile \
+              -type f \
+              -name '*.dartpseudo' \
+              -print | sort
 
             echo
             echo "=== REPORT FILES ==="
-            find work/decompile -type f -name '*.json' -print | sort
+
+            find work/decompile \
+              -type f \
+              -name '*.json' \
+              -print | sort
+
           } | tee work/focused/painter-search.txt
 
           echo "Focused search complete."
