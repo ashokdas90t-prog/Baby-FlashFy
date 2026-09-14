@@ -154,7 +154,7 @@ jobs:
 
           git clone \
             --depth 1 \
-            --branch main \
+            --branch v0.1.0-alpha.4 \
             https://github.com/caverav/flutterdec.git \
             work/flutterdec-source
 
@@ -166,6 +166,11 @@ jobs:
 
           test -d \
             work/flutterdec-source/data
+
+          echo "=== FLUTTERDEC SOURCE VERSION ==="
+
+          git -C work/flutterdec-source describe --tags --always
+          git -C work/flutterdec-source rev-parse HEAD
 
           echo "flutterdec source data: PASS"
 
