@@ -1,215 +1,128 @@
-name: Build FlashFy - Baby Image FINAL
+name: Analyze FlashFy Flutter AOT
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "base.apk"
-      - "split_config.arm64_v8a.apk"
-      - "split_config.en.apk"
-      - "split_config.xxhdpi.apk"
-      - "bg-fixed.png"
-      - ".github/workflows/build.yml"
 
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check inputs and PNG
+      - name: Check APK
+        run: |
+          set -e
+          test -s base.apk
+          test -s split_config.arm64_v8a.apk
+          ls -lh base.apk split_config.arm64_v8a.apk
+
+      - name: Install Flutter AOT decompiler
         run: |
           set -e
 
-          for f in base.apk split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk bg-fixed.png; do
-            test -s "$f"
-          done
-
-          ls -lh base.apk split_config.arm64_v8a.apk split_config.en.apk split_config.xxhdpi.apk bg-fixed.png
-
-          echo "Image type:"
-          file bg-fixed.png
-
-          python3 - <<'PY'
-          import struct
-
-          p = "bg-fixed.png"
-          with open(p, "rb") as f:
-              sig = f.read(8)
-              assert sig == b"\x89PNG\r\n\x1a\n", "Not a valid PNG signature"
-
-              length = struct.unpack(">I", f.read(4))[0]
-              chunk = f.read(4)
-              assert chunk == b"IHDR", "PNG IHDR missing"
-
-              data = f.read(length)
-              width, height = struct.unpack(">II", data[:8])
-
-          print("PNG width :", width)
-          print("PNG height:", height)
-
-          assert width == 864, f"Unexpected width: {width}"
-          assert height == 1536, f"Unexpected height: {height}"
-
-          print("PNG CHECK: PASS")
-          PY
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Download APKEditor 1.4.9
-        run: |
-          set -e
           curl -fL \
-            "https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar" \
-            -o APKEditor.jar
-          test -s APKEditor.jar
-          ls -lh APKEditor.jar
+            "https://github.com/caverav/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz" \
+            -o flutterdec.tar.gz
 
-      - name: Prepare split APKs
-        run: |
-          set -e
-          rm -rf work output
-          mkdir -p work/apks output
+          mkdir -p flutterdec-dist
+          tar -xzf flutterdec.tar.gz -C flutterdec-dist
 
-          cp base.apk work/apks/
-          cp split_config.arm64_v8a.apk work/apks/
-          cp split_config.en.apk work/apks/
-          cp split_config.xxhdpi.apk work/apks/
+          chmod +x flutterdec-dist/bin/flutterdec
 
-      - name: Merge split APKs
+          ./flutterdec-dist/bin/flutterdec --version || true
+
+      - name: Inspect Flutter AOT snapshot
         run: |
           set -e
 
-          java -Xmx4g -jar APKEditor.jar m \
-            -i work/apks \
-            -o output/merged-unsigned.apk \
-            -clean-meta \
-            -f
+          mkdir -p analysis
 
-          test -s output/merged-unsigned.apk
-          ls -lh output/merged-unsigned.apk
+          ./flutterdec-dist/bin/flutterdec \
+            info base.apk --json \
+            > analysis/info.json 2>&1 || true
 
-      - name: Replace Flutter ON image
+          cat analysis/info.json
+
+      - name: Install matching AOT adapter
         run: |
           set -e
 
-          rm -rf work/merged
-          mkdir -p work/merged
-          unzip -q output/merged-unsigned.apk -d work/merged
+          HASH="$(python3 - <<'PY'
+          import json
+          p="analysis/info.json"
+          try:
+              d=json.load(open(p))
+          except Exception:
+              d={}
+          h=d.get("snapshot_hash","")
+          print(h if isinstance(h,str) else "")
+          PY
+          )"
 
-          TARGET="work/merged/assets/flutter_assets/assets/flash_on.png"
-          test -f "$TARGET"
+          echo "Detected snapshot hash: $HASH"
 
-          cp -f bg-fixed.png "$TARGET"
+          if [ -z "$HASH" ]; then
+            echo "Could not detect snapshot hash."
+            exit 1
+          fi
 
-          SOURCE_HASH="$(sha256sum bg-fixed.png | awk '{print $1}')"
-          TARGET_HASH="$(sha256sum "$TARGET" | awk '{print $1}')"
+          ./flutterdec-dist/bin/flutterdec \
+            adapter install --dart-hash "$HASH" || true
 
-          echo "Source hash : $SOURCE_HASH"
-          echo "Target hash : $TARGET_HASH"
+          ./flutterdec-dist/bin/flutterdec \
+            adapter list || true
 
-          test "$SOURCE_HASH" = "$TARGET_HASH"
-          echo "IMAGE REPLACEMENT: PASS"
-
-      - name: Repack modified APK
+      - name: Decompile app-owned Flutter code
         run: |
           set -e
 
-          rm -f output/modified-unsigned.apk
-          (
-            cd work/merged
-            zip -q -r -0 ../../output/modified-unsigned.apk .
-          )
+          mkdir -p analysis/decompiled
 
-          test -s output/modified-unsigned.apk
-          ls -lh output/modified-unsigned.apk
+          ./flutterdec-dist/bin/flutterdec \
+            decompile base.apk \
+            -o analysis/decompiled \
+            --function-scope app-unknown \
+            --emit-asm \
+            --emit-ir \
+            > analysis/decompile.log 2>&1 || true
 
-      - name: Find Android build tools
+          echo "===== DECOMPILER LOG ====="
+          cat analysis/decompile.log
+
+          echo "===== TARGET FUNCTION SEARCH ====="
+
+          grep -RniE \
+            "_RopeBulbPainter|_drawBulb|_drawPullRope|_paintBackgroundImage|_BackgroundPainter|FlashfyScreen|flash_on|flash_off" \
+            analysis/decompiled \
+            > analysis/target-functions.txt || true
+
+          cat analysis/target-functions.txt || true
+
+      - name: Create focused report
         run: |
           set -e
 
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
-            -mindepth 1 -maxdepth 1 -type d |
-            sort -V | tail -n 1)"
+          {
+            echo "FlashFy Flutter AOT analysis"
+            echo
+            echo "Target functions:"
+            grep -RniE \
+              "_RopeBulbPainter|_drawBulb|_drawPullRope|_paintBackgroundImage|_BackgroundPainter|FlashfyScreen" \
+              analysis/decompiled 2>/dev/null || true
+            echo
+            echo "Image references:"
+            grep -RniE \
+              "flash_on|flash_off|drawImage|AssetImage|ImageProvider|paintImage" \
+              analysis/decompiled 2>/dev/null || true
+          } > analysis/FOCUSED-REPORT.txt
 
-          test -x "$BUILD_TOOLS/zipalign"
-          test -x "$BUILD_TOOLS/apksigner"
+          cat analysis/FOCUSED-REPORT.txt
 
-          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
-
-      - name: Create signing key
-        run: |
-          set -e
-
-          keytool -genkeypair -v \
-            -keystore flashfy.keystore \
-            -alias flashfy \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass flashfy123 \
-            -keypass flashfy123 \
-            -dname "CN=FlashFy, OU=FlashFy, O=FlashFy, C=US"
-
-      - name: Zipalign
-        run: |
-          set -e
-
-          "$BUILD_TOOLS/zipalign" -f -p 4 \
-            output/modified-unsigned.apk \
-            output/aligned.apk
-
-          "$BUILD_TOOLS/zipalign" -c -v 4 output/aligned.apk
-
-      - name: Sign APK
-        run: |
-          set -e
-
-          "$BUILD_TOOLS/apksigner" sign \
-            --ks flashfy.keystore \
-            --ks-key-alias flashfy \
-            --ks-pass pass:flashfy123 \
-            --key-pass pass:flashfy123 \
-            --out output/FlashFy-universal.apk \
-            output/aligned.apk
-
-          test -s output/FlashFy-universal.apk
-
-      - name: Final verification
-        run: |
-          set -e
-
-          "$BUILD_TOOLS/apksigner" verify --verbose output/FlashFy-universal.apk
-
-          rm -rf work/final_check
-          mkdir -p work/final_check
-          unzip -q output/FlashFy-universal.apk -d work/final_check
-
-          FINAL_IMAGE="work/final_check/assets/flutter_assets/assets/flash_on.png"
-          test -f "$FINAL_IMAGE"
-
-          SOURCE_HASH="$(sha256sum bg-fixed.png | awk '{print $1}')"
-          FINAL_HASH="$(sha256sum "$FINAL_IMAGE" | awk '{print $1}')"
-
-          echo "Source hash: $SOURCE_HASH"
-          echo "Final hash : $FINAL_HASH"
-
-          test "$SOURCE_HASH" = "$FINAL_HASH"
-
-          echo "FINAL IMAGE CHECK: PASS"
-          echo "FINAL APK CHECK: PASS"
-
-          ls -lh output/FlashFy-universal.apk
-
-      - name: Upload final APK
+      - name: Upload AOT analysis
         uses: actions/upload-artifact@v4
         with:
-          name: FlashFy-single-APK-FINAL
-          path: output/FlashFy-universal.apk
+          name: FlashFy-AOT-analysis
+          path: analysis/
           if-no-files-found: error
