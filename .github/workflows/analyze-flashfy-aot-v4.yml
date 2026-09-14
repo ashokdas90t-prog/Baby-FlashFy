@@ -4,19 +4,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  analyze:
+  flashfy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check APK inputs
+      - name: Prepare APK
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/input
+          mkdir -p work/input work/native work/out
 
           for f in \
             base.apk \
@@ -24,44 +24,48 @@ jobs:
             split_config.en.apk \
             split_config.xxhdpi.apk
           do
-            if [ ! -f "$f" ]; then
-              echo "Missing APK: $f"
-              exit 1
-            fi
+            test -f "$f"
             cp "$f" work/input/
           done
 
-          echo "APK inputs OK:"
+          echo "APK files:"
           ls -lh work/input/
 
-      - name: Download APKEditor 1.4.9
+      # ---------------------------------------------------------
+      # No APKEditor download.
+      # Build APKEditor directly from its official repository.
+      # ---------------------------------------------------------
+      - name: Build APKEditor
         shell: bash
         run: |
           set -euo pipefail
 
-          # Fixed release asset URL; do not use latest/download.
-          URL="https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar"
+          git clone --depth 1 \
+            https://github.com/REAndroid/APKEditor.git \
+            work/APKEditor
 
-          curl -fL --retry 5 --retry-delay 2 \
-            "$URL" \
-            -o APKEditor.jar
+          cd work/APKEditor
 
-          test -s APKEditor.jar
+          chmod +x gradlew
 
-          echo "APKEditor downloaded:"
-          ls -lh APKEditor.jar
+          ./gradlew fatJar --no-daemon
 
-          java -jar APKEditor.jar -version || \
-          java -jar APKEditor.jar -v || true
+          JAR="$(find build/libs -maxdepth 1 -type f -name '*.jar' | head -n 1)"
 
-      - name: Merge split APKs
+          test -n "$JAR"
+
+          cp "$JAR" "$GITHUB_WORKSPACE/work/APKEditor.jar"
+
+          cd "$GITHUB_WORKSPACE"
+
+          java -jar work/APKEditor.jar -version || true
+
+      - name: Merge split APK
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p work/merged
-
-          java -jar APKEditor.jar \
+          java -jar work/APKEditor.jar \
             m \
             -i work/input \
             -o work/flashfy.apk
@@ -71,166 +75,14 @@ jobs:
           echo "Merged APK:"
           ls -lh work/flashfy.apk
 
-      - name: Download flutterdec release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          URL="https://github.com/caverav/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz"
-
-          curl -fL --retry 5 --retry-delay 2 \
-            "$URL" \
-            -o flutterdec.tar.gz
-
-          test -s flutterdec.tar.gz
-
-          rm -rf flutterdec-prefix
-          mkdir -p flutterdec-prefix
-
-          tar -xzf flutterdec.tar.gz \
-            -C flutterdec-prefix \
-            --strip-components=1
-
-          echo "flutterdec files:"
-          find flutterdec-prefix -maxdepth 4 -type f | sort | head -150
-
-          test -x flutterdec-prefix/bin/flutterdec
-
-          # Release must contain its bundled data.
-          test -f flutterdec-prefix/share/flutterdec/adapters/registry.json
-
-          echo "$GITHUB_WORKSPACE/flutterdec-prefix/bin" >> "$GITHUB_PATH"
-
-      - name: Inspect Flutter AOT snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p work
-
-          flutterdec info \
-            work/flashfy.apk \
-            --json \
-            | tee work/info-before.json
-
-          HASH="$(python3 - <<'PY'
-          import json
-
-          with open("work/info-before.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(data["snapshot_hash"])
-          PY
-          )"
-
-          DART_VERSION="$(python3 - <<'PY'
-          import json
-
-          with open("work/info-before.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(data.get("dart_version", "unknown"))
-          PY
-          )"
-
-          echo "Detected snapshot hash: $HASH"
-          echo "Detected Dart version: $DART_VERSION"
-
-          # This is the snapshot from the current FlashFy APK.
-          EXPECTED="78da37fed6bf1489361a312568249f3f"
-
-          if [ "$HASH" != "$EXPECTED" ]; then
-            echo "ERROR: unexpected snapshot hash"
-            echo "Expected: $EXPECTED"
-            echo "Actual:   $HASH"
-            exit 1
-          fi
-
-          echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
-
-      - name: Install matching Dart AOT adapter
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf "$GITHUB_WORKSPACE/adapter-store"
-          mkdir -p "$GITHUB_WORKSPACE/adapter-store"
-
-          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/adapter-store"
-
-          echo "Installing adapter for:"
-          echo "$SNAPSHOT_HASH"
-
-          flutterdec adapter install \
-            --dart-hash "$SNAPSHOT_HASH" \
-            --json \
-            | tee work/adapter-install.json
-
-          echo
-          echo "Adapter list:"
-          flutterdec adapter list --json \
-            | tee work/adapter-list.json
-
-          python3 - <<'PY'
-          import json
-
-          with open("work/adapter-list.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(json.dumps(data, indent=2))
-
-          text = json.dumps(data).lower()
-
-          if "verified" not in text:
-              raise SystemExit(
-                  "ERROR: matching adapter is not verified."
-              )
-
-          if "78da37fed6bf1489361a312568249f3f" not in text:
-              raise SystemExit(
-                  "ERROR: expected snapshot hash is not present "
-                  "in adapter list."
-              )
-
-          print("MATCHING VERIFIED ADAPTER FOUND.")
-          PY
-
-      - name: Decompile Flutter AOT
-        shell: bash
-        env:
-          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/adapter-store
-        run: |
-          set +e
-
-          rm -rf work/decompile
-          mkdir -p work/decompile
-
-          flutterdec decompile \
-            work/flashfy.apk \
-            -o work/decompile \
-            --emit-asm \
-            --emit-ir \
-            --emit-ghidra-script \
-            --emit-ida-script
-
-          RC=$?
-
-          echo "flutterdec exit code: $RC"
-
-          # Keep going if flutterdec produced useful output.
-          if [ -z "$(find work/decompile -type f -print -quit)" ]; then
-            echo "No decompile artifacts were produced."
-            exit "$RC"
-          fi
-
-          exit 0
-
+      # ---------------------------------------------------------
+      # Extract ARM64 Flutter AOT directly.
+      # No need to make flutterdec inspect a merged APK.
+      # ---------------------------------------------------------
       - name: Extract libapp.so
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p work/native
 
           unzip -p \
             work/flashfy.apk \
@@ -241,7 +93,115 @@ jobs:
 
           ls -lh work/native/libapp.so
 
-      - name: Locate FlashFy painter functions
+      # ---------------------------------------------------------
+      # Flutterdec directly from GitHub/Nix.
+      # This avoids the broken release download completely.
+      # ---------------------------------------------------------
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Flutterdec info
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nix run github:caverav/flutterdec -- \
+            info work/native/libapp.so --json \
+            | tee work/info.json
+
+          HASH="$(python3 - <<'PY'
+          import json
+
+          with open("work/info.json", "r", encoding="utf-8") as f:
+              x = json.load(f)
+
+          print(x["snapshot_hash"])
+          PY
+          )"
+
+          echo "Detected snapshot: $HASH"
+
+          echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
+
+      - name: Verify expected FlashFy snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="78da37fed6bf1489361a312568249f3f"
+
+          if [ "$SNAPSHOT_HASH" != "$EXPECTED" ]; then
+            echo "Wrong APK detected."
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $SNAPSHOT_HASH"
+            exit 1
+          fi
+
+          echo "Correct FlashFy snapshot confirmed."
+
+      - name: Install matching adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/adapter-store
+
+          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
+
+          nix run github:caverav/flutterdec -- \
+            adapter install \
+            --dart-hash "$SNAPSHOT_HASH" \
+            --json \
+            | tee work/adapter-install.json
+
+          nix run github:caverav/flutterdec -- \
+            adapter list --json \
+            | tee work/adapter-list.json
+
+          cat work/adapter-list.json
+
+          python3 - <<'PY'
+          import json
+
+          with open("work/adapter-list.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          text = json.dumps(data).lower()
+
+          if "verified" not in text:
+              raise SystemExit(
+                  "Matching AOT adapter was not verified."
+              )
+
+          print("AOT adapter VERIFIED.")
+          PY
+
+      - name: Decompile FlashFy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/decompile
+
+          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
+
+          nix run github:caverav/flutterdec -- \
+            decompile \
+            work/native/libapp.so \
+            -o work/decompile \
+            --emit-asm \
+            --emit-ir \
+            --emit-ghidra-script \
+            --emit-ida-script \
+            --function-scope all
+
+          echo
+          echo "Decompile output:"
+          find work/decompile -type f | sort
+
+      - name: Find lamp renderer
         shell: bash
         run: |
           set -euo pipefail
@@ -253,22 +213,15 @@ jobs:
             '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
             | tee work/focused/painter-strings.txt || true
 
-          echo
-          echo "Searching decompiler output..."
-
           grep -RniE \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn' \
             work/decompile \
-            > work/focused/painter-decompile.txt || true
+            > work/focused/painter-code.txt || true
 
-          echo
-          echo "Decompile files:"
-          find work/decompile \
-            -type f \
-            | sort \
-            | tee work/focused/decompile-files.txt
+          cat work/focused/painter-strings.txt
+          cat work/focused/painter-code.txt || true
 
-      - name: Build final report
+      - name: Create final report
         shell: bash
         run: |
           set -euo pipefail
@@ -277,37 +230,31 @@ jobs:
             echo "FlashFy Flutter AOT Analysis"
             echo "============================="
             echo
-            echo "Snapshot hash: $SNAPSHOT_HASH"
+            echo "Snapshot: $SNAPSHOT_HASH"
             echo
-            echo "=== Flutterdec info ==="
-            cat work/info-before.json
+            echo "=== INFO ==="
+            cat work/info.json
             echo
-            echo "=== Adapter install ==="
-            cat work/adapter-install.json || true
+            echo "=== ADAPTER ==="
+            cat work/adapter-list.json
             echo
-            echo "=== Adapter list ==="
-            cat work/adapter-list.json || true
+            echo "=== LAMP FUNCTIONS ==="
+            cat work/focused/painter-strings.txt
             echo
-            echo "=== Painter/native strings ==="
-            cat work/focused/painter-strings.txt || true
-            echo
-            echo "=== Painter references in decompiler ==="
-            cat work/focused/painter-decompile.txt || true
-            echo
-            echo "=== Decompile files ==="
-            cat work/focused/decompile-files.txt || true
+            echo "=== DECOMPILED REFERENCES ==="
+            cat work/focused/painter-code.txt || true
           } > work/focused/REPORT.txt
 
           cat work/focused/REPORT.txt
 
-      - name: Upload AOT analysis
+      - name: Upload complete AOT analysis
         uses: actions/upload-artifact@v4
         with:
           name: FlashFy-AOT-analysis
           path: |
-            work/info-before.json
+            work/info.json
             work/adapter-install.json
             work/adapter-list.json
-            work/decompile/**
             work/native/libapp.so
+            work/decompile/**
             work/focused/**
