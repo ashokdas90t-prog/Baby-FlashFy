@@ -177,12 +177,46 @@ jobs:
           ls -lh \
             work/flutterdec-source/adapters/python/adapter_template.py
 
+      - name: Make flutterdec adapter files available
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf adapters data
+
+          cp -R \
+            work/flutterdec-source/adapters \
+            ./adapters
+
+          cp -R \
+            work/flutterdec-source/data \
+            ./data
+
+          test -f \
+            adapters/python/adapter_template.py
+
+          test -f \
+            adapters/registry.json
+
+          test -d \
+            data
+
+          echo "Adapter template:"
+          ls -lh \
+            adapters/python/adapter_template.py
+
+          echo "Registry:"
+          ls -lh \
+            adapters/registry.json
+
+          echo "flutterdec adapter files: PASS"
+
       - name: Configure flutterdec data
         shell: bash
         run: |
           set -euo pipefail
 
-          export FLUTTERDEC_DATA_DIR="$GITHUB_WORKSPACE/work/flutterdec-source"
+          export FLUTTERDEC_DATA_DIR="$GITHUB_WORKSPACE"
 
           echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_DATA_DIR" \
             >> "$GITHUB_ENV"
@@ -195,6 +229,9 @@ jobs:
 
           test -f \
             "$FLUTTERDEC_DATA_DIR/adapters/python/adapter_template.py"
+
+          test -d \
+            "$FLUTTERDEC_DATA_DIR/data"
 
           echo "flutterdec data configuration: PASS"
 
@@ -279,8 +316,11 @@ jobs:
 
           mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
 
-          echo "Installing adapter for:"
+          echo "Installing adapter for snapshot hash:"
           echo "$HASH"
+
+          test -f \
+            "$GITHUB_WORKSPACE/adapters/python/adapter_template.py"
 
           "$FLUTTERDEC_BIN" \
             adapter install \
@@ -328,17 +368,15 @@ jobs:
           echo "=== DECOMPILE FILES ==="
 
           find work/decompile \
-            -maxdepth 6 \
+            -maxdepth 8 \
             -type f \
             -print \
             | sort
 
           echo "Decompile step completed."
 
-          # flutterdec can intentionally return non-zero because of
-          # its quality gate while still producing useful artifacts.
-          # Therefore we do not fail here solely because RC != 0.
-
+          # flutterdec may return non-zero because of quality gates
+          # even when useful analysis artifacts were produced.
           exit 0
 
       - name: Search FlashFy painter functions
@@ -368,6 +406,39 @@ jobs:
             find work/decompile \
               -type f \
               -name '*.dartpseudo' \
+              -print \
+              | sort
+
+            echo
+            echo "========================================"
+            echo "DART FILES"
+            echo "========================================"
+
+            find work/decompile \
+              -type f \
+              -name '*.dart' \
+              -print \
+              | sort
+
+            echo
+            echo "========================================"
+            echo "ASM FILES"
+            echo "========================================"
+
+            find work/decompile \
+              -type f \
+              -name '*.asm' \
+              -print \
+              | sort
+
+            echo
+            echo "========================================"
+            echo "IR FILES"
+            echo "========================================"
+
+            find work/decompile \
+              -type f \
+              -name '*.ir' \
               -print \
               | sort
 
@@ -410,11 +481,17 @@ jobs:
 
             echo
             echo "Painter search:"
-            cat work/focused/painter-search.txt
+            cat work/focused/painter-search.txt \
+              || true
 
             echo
             echo "Decompile exit code:"
             cat work/decompile/exit-code.txt \
+              || true
+
+            echo
+            echo "Decompile log:"
+            cat work/decompile/decompile.log \
               || true
 
           } > \
