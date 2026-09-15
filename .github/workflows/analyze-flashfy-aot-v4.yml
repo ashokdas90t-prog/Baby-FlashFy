@@ -15,17 +15,30 @@ jobs:
         shell: bash
         run: |
           set -e
+
+          echo "Checking FlashFy APK..."
+
           test -f split_config.arm64_v8a.apk
+
           mkdir -p work/native
+
           echo "APK input OK"
 
       - name: Extract libapp.so
         shell: bash
         run: |
           set -e
-          unzip -p split_config.arm64_v8a.apk \
-            lib/arm64-v8a/libapp.so > work/native/libapp.so
+
+          echo "Extracting Flutter libapp.so..."
+
+          unzip -p \
+            split_config.arm64_v8a.apk \
+            lib/arm64-v8a/libapp.so \
+            > work/native/libapp.so
+
           test -s work/native/libapp.so
+
+          echo "libapp.so extracted successfully"
           ls -lh work/native/libapp.so
 
       - name: Install Nix
@@ -40,168 +53,70 @@ jobs:
 
           mkdir -p work
 
-          nix run github:caverav/flutterdec -- \
-            info work/native/libapp.so --json \
-            > work/info.raw 2> work/info.stderr || true
-
-          cat work/info.stderr || true
-          cat work/info.raw || true
-
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          raw = Path("work/info.raw").read_text(errors="replace")
-          decoder = json.JSONDecoder()
-          found = None
-
-          for i, ch in enumerate(raw):
-              if ch != "{":
-                  continue
-              try:
-                  obj, _ = decoder.raw_decode(raw[i:])
-              except Exception:
-                  continue
-              if isinstance(obj, dict) and obj.get("snapshot_hash"):
-                  found = obj
-
-          if found is None:
-              raise SystemExit(
-                  "ERROR: flutterdec did not return snapshot_hash"
-              )
-
-          Path("work/info.json").write_text(
-              json.dumps(found, indent=2)
-          )
-
-          Path("work/snapshot_hash").write_text(
-              found["snapshot_hash"]
-          )
-
-          print(json.dumps(found, indent=2))
-          PY
-
-          HASH="$(cat work/snapshot_hash)"
-
-          echo "Detected snapshot: $HASH"
-
-          test "$HASH" = "78da37fed6bf1489361a312568249f3f"
-
-          echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
-
-      - name: Install Flutter AOT adapter
-        shell: bash
-        env:
-          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
-        run: |
-          set -e
-
-          mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
+          echo "======================================"
+          echo "Flutterdec version"
+          echo "======================================"
 
           nix run github:caverav/flutterdec -- \
-            adapter install \
-            --dart-hash "$SNAPSHOT_HASH" \
-            > work/adapter-install.raw \
-            2> work/adapter-install.stderr
+            --version || true
 
-          cat work/adapter-install.stderr || true
-          cat work/adapter-install.raw || true
+          echo
+          echo "======================================"
+          echo "Flutterdec info"
+          echo "======================================"
 
-          nix run github:caverav/flutterdec -- \
-            adapter list --json \
-            > work/adapter-list.raw \
-            2> work/adapter-list.stderr
-
-          cat work/adapter-list.stderr || true
-          cat work/adapter-list.raw
-
-      - name: Decompile Flutter AOT
-        shell: bash
-        env:
-          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
-        run: |
           set +e
 
           nix run github:caverav/flutterdec -- \
-            decompile work/native/libapp.so \
-            -o work/decompile \
-            --emit-asm \
-            --emit-ir \
-            --function-scope all \
-            > work/decompile.raw \
-            2> work/decompile.stderr
+            info work/native/libapp.so --json \
+            2>&1 | tee work/flutterdec-info.log
 
-          RC=$?
+          RC=${PIPESTATUS[0]}
 
           set -e
 
-          cat work/decompile.stderr || true
+          echo
+          echo "flutterdec info exit code: $RC"
 
-          echo "Decompile exit code: $RC"
+          echo
+          echo "======================================"
+          echo "Searching snapshot hash"
+          echo "======================================"
 
-          find work/decompile -type f -print || true
+          HASH=$(
+            grep -oE \
+              '"snapshot_hash"[[:space:]]*:[[:space:]]*"[^"]+"' \
+              work/flutterdec-info.log \
+              | head -1 \
+              | sed -E \
+              's/.*"snapshot_hash"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+          )
 
-          if find work/decompile -type f -print -quit | grep -q .; then
-            exit 0
+          echo "Detected snapshot hash: $HASH"
+
+          if [ -z "$HASH" ]; then
+            echo
+            echo "ERROR: snapshot_hash was not found."
+            echo
+            echo "Complete flutterdec output:"
+            cat work/flutterdec-info.log
+            exit 1
           fi
 
-          exit "$RC"
+          echo "$HASH" > work/snapshot_hash
 
-      - name: Find FlashFy painter code
-        shell: bash
-        run: |
-          set -e
+          echo
+          echo "Snapshot hash:"
+          cat work/snapshot_hash
 
-          mkdir -p work/focused
+          echo
+          echo "Expected FlashFy snapshot hash:"
+          echo "78da37fed6bf1489361a312568249f3f"
 
-          strings -t x work/native/libapp.so \
-            | grep -E \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
-            > work/focused/painter-strings.txt || true
-
-          grep -RniE \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn' \
-            work/decompile \
-            > work/focused/painter-code.txt || true
-
-          cat work/focused/painter-strings.txt || true
-          cat work/focused/painter-code.txt || true
-
-      - name: Create report
-        shell: bash
-        run: |
-          {
-            echo "FlashFy Flutter AOT Analysis"
+          if [ "$HASH" != "78da37fed6bf1489361a312568249f3f" ]; then
             echo
-            echo "Snapshot hash:"
-            cat work/snapshot_hash
-            echo
-            echo "Painter strings:"
-            cat work/focused/painter-strings.txt || true
-            echo
-            echo "Painter code:"
-            cat work/focused/painter-code.txt || true
-          } > REPORT.txt
+            echo "ERROR: Unexpected snapshot hash."
+            exit 1
+          fi
 
-          cat REPORT.txt
-
-      - name: Upload analysis
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlashFy-AOT-analysis
-          if-no-files-found: error
-          path: |
-            REPORT.txt
-            work/info.json
-            work/info.raw
-            work/info.stderr
-            work/snapshot_hash
-            work/adapter-install.raw
-            work/adapter-install.stderr
-            work/adapter-list.raw
-            work/adapter-list.stderr
-            work/native/libapp.so
-            work/decompile.raw
-            work/decompile.stderr
-            work/decompile/**
-            work/focused/**
+         
