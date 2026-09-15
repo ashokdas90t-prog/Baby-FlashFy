@@ -16,21 +16,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          for f in \
-            base.apk \
-            split_config.arm64_v8a.apk \
-            split_config.en.apk \
-            split_config.xxhdpi.apk
-          do
-            test -f "$f" || {
-              echo "Missing: $f"
-              exit 1
-            }
-          done
+          test -f split_config.arm64_v8a.apk || {
+            echo "Missing split_config.arm64_v8a.apk"
+            exit 1
+          }
 
-          echo "All APK inputs found."
+          echo "ARM64 split found:"
+          ls -lh split_config.arm64_v8a.apk
 
-      - name: Extract libapp.so directly
+      - name: Extract libapp.so
         shell: bash
         run: |
           set -euo pipefail
@@ -44,68 +38,93 @@ jobs:
 
           test -s work/native/libapp.so
 
-          echo "libapp.so extracted:"
+          echo "libapp.so:"
           ls -lh work/native/libapp.so
-
-      - name: Extract Flutter assets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p work/assets
-
-          unzip -l base.apk \
-            | grep 'assets/flutter_assets/' \
-            | tee work/assets/list.txt || true
-
-          unzip -p base.apk \
-            assets/flutter_assets/AssetManifest.bin \
-            > work/assets/AssetManifest.bin || true
-
-          unzip -p base.apk \
-            assets/flutter_assets/assets/flash_on.png \
-            > work/assets/flash_on.png || true
-
-          unzip -p base.apk \
-            assets/flutter_assets/assets/flash_off.png \
-            > work/assets/flash_off.png || true
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Detect AOT snapshot
+      - name: Locate Flutter AOT snapshot
         shell: bash
         run: |
           set -euo pipefail
 
+          mkdir -p work
+
+          echo "Running flutterdec info..."
+
+          set +e
+
           nix run github:caverav/flutterdec -- \
             info work/native/libapp.so --json \
-            | tee work/info.json
+            > work/info.raw 2> work/info.stderr
 
-          HASH="$(python3 - <<'PY'
+          RC=$?
+
+          set -e
+
+          echo "flutterdec info exit code: $RC"
+
+          echo "=== stderr ==="
+          cat work/info.stderr || true
+
+          echo "=== raw output ==="
+          cat work/info.raw || true
+
+          # Extract the JSON object even if the command printed
+          # additional non-JSON text around it.
+          python3 - <<'PY'
           import json
+          from pathlib import Path
 
-          with open("work/info.json", encoding="utf-8") as f:
-              x = json.load(f)
+          raw = Path("work/info.raw").read_text(
+              encoding="utf-8",
+              errors="replace"
+          )
 
-          print(x["snapshot_hash"])
+          decoder = json.JSONDecoder()
+          found = None
+
+          for i, ch in enumerate(raw):
+              if ch != "{":
+                  continue
+
+              try:
+                  obj, end = decoder.raw_decode(raw[i:])
+                  if isinstance(obj, dict) and "snapshot_hash" in obj:
+                      found = obj
+              except Exception:
+                  pass
+
+          if found is None:
+              print("Could not find flutterdec JSON.")
+              raise SystemExit(1)
+
+          Path("work/info.json").write_text(
+              json.dumps(found, indent=2),
+              encoding="utf-8"
+          )
+
+          print(json.dumps(found, indent=2))
+
+          snapshot = found.get("snapshot_hash")
+          if not snapshot:
+              raise SystemExit("snapshot_hash missing")
+
+          print("SNAPSHOT_HASH=" + snapshot)
+
+          Path("work/snapshot_hash").write_text(
+              snapshot,
+              encoding="utf-8"
+          )
           PY
-          )"
 
-          DART="$(python3 - <<'PY'
-          import json
+          HASH="$(cat work/snapshot_hash)"
 
-          with open("work/info.json", encoding="utf-8") as f:
-              x = json.load(f)
-
-          print(x.get("dart_version", "unknown"))
-          PY
-          )"
-
-          echo "Snapshot: $HASH"
-          echo "Dart: $DART"
+          echo "Detected snapshot hash:"
+          echo "$HASH"
 
           echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
 
@@ -116,38 +135,233 @@ jobs:
 
           EXPECTED="78da37fed6bf1489361a312568249f3f"
 
+          echo "Expected: $EXPECTED"
+          echo "Detected: $SNAPSHOT_HASH"
+
           if [ "$SNAPSHOT_HASH" != "$EXPECTED" ]; then
-            echo "Unexpected snapshot hash."
-            echo "Expected: $EXPECTED"
-            echo "Actual:   $SNAPSHOT_HASH"
+            echo "ERROR: This is not the expected FlashFy snapshot."
             exit 1
           fi
 
-          echo "Correct FlashFy AOT snapshot confirmed."
+          echo "FlashFy snapshot confirmed."
 
-      - name: Install matching adapter
+      - name: Prepare adapter store
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf work/adapter-store
           mkdir -p work/adapter-store
 
-          export FLUTTERDEC_ADAPTER_STORE="$GITHUB_WORKSPACE/work/adapter-store"
+          echo "FLUTTERDEC_ADAPTER_STORE=$GITHUB_WORKSPACE/work/adapter-store" \
+            >> "$GITHUB_ENV"
+
+      - name: Install exact AOT adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Installing adapter for:"
+          echo "$SNAPSHOT_HASH"
+
+          set +e
 
           nix run github:caverav/flutterdec -- \
             adapter install \
             --dart-hash "$SNAPSHOT_HASH" \
             --json \
-            | tee work/adapter-install.json
+            > work/adapter-install.raw \
+            2> work/adapter-install.stderr
+
+          RC=$?
+
+          set -e
+
+          echo "adapter install exit code: $RC"
+
+          echo "=== adapter stderr ==="
+          cat work/adapter-install.stderr || true
+
+          echo "=== adapter output ==="
+          cat work/adapter-install.raw || true
+
+          cp work/adapter-install.raw work/adapter-install.json
+
+          # Installation must succeed.
+          if [ "$RC" -ne 0 ]; then
+            echo "Adapter installation failed."
+            exit "$RC"
+          fi
+
+      - name: Verify adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set +e
 
           nix run github:caverav/flutterdec -- \
             adapter list --json \
-            | tee work/adapter-list.json
+            > work/adapter-list.raw \
+            2> work/adapter-list.stderr
 
-          echo
-          cat work/adapter-list.json
+          RC=$?
+
+          set -e
+
+          echo "adapter list exit code: $RC"
+
+          cat work/adapter-list.stderr || true
+          cat work/adapter-list.raw || true
+
+          cp work/adapter-list.raw work/adapter-list.json
 
           python3 - <<'PY'
-          import json
+          from pathlib import Path
 
-          with open("
+          text = Path("work/adapter-list.raw").read_text(
+              encoding="utf-8",
+              errors="replace"
+          )
+
+          lower = text.lower()
+
+          if "verified" not in lower:
+              print(text)
+              raise SystemExit(
+                  "Matching adapter is NOT verified."
+              )
+
+          if "78da37fed6bf1489361a312568249f3f" not in lower:
+              print(text)
+              raise SystemExit(
+                  "Expected snapshot hash is missing from adapter list."
+              )
+
+          print("MATCHING ADAPTER VERIFIED.")
+          PY
+
+      - name: Decompile FlashFy AOT
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf work/decompile
+          mkdir -p work/decompile
+
+          set +e
+
+          nix run github:caverav/flutterdec -- \
+            decompile \
+            work/native/libapp.so \
+            -o work/decompile \
+            --emit-asm \
+            --emit-ir \
+            --emit-ghidra-script \
+            --emit-ida-script \
+            --function-scope all \
+            > work/decompile.raw \
+            2> work/decompile.stderr
+
+          RC=$?
+
+          set -e
+
+          echo "Decompile exit code: $RC"
+
+          cat work/decompile.stderr || true
+
+          # flutterdec may return 1 because of its quality gate
+          # while still producing all useful artifacts.
+          if find work/decompile -type f -print -quit | grep -q .; then
+            echo "Decompile artifacts found."
+            exit 0
+          fi
+
+          echo "No decompile artifacts were produced."
+          exit "$RC"
+
+      - name: Locate FlashFy lamp painter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/focused
+
+          strings -t x work/native/libapp.so \
+            | grep -E \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
+            | tee work/focused/painter-strings.txt || true
+
+          grep -RniE \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
+            work/decompile \
+            > work/focused/painter-code.txt || true
+
+          echo "=== Painter strings ==="
+          cat work/focused/painter-strings.txt || true
+
+          echo
+          echo "=== Painter references ==="
+          cat work/focused/painter-code.txt || true
+
+      - name: Build final report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "FlashFy Flutter AOT Analysis"
+            echo "============================="
+            echo
+            echo "Snapshot hash:"
+            cat work/snapshot_hash
+            echo
+            echo "=== Flutterdec info ==="
+            cat work/info.json
+            echo
+            echo "=== Adapter install ==="
+            cat work/adapter-install.json || true
+            echo
+            echo "=== Adapter list ==="
+            cat work/adapter-list.json || true
+            echo
+            echo "=== Painter strings ==="
+            cat work/focused/painter-strings.txt || true
+            echo
+            echo "=== Painter decompile references ==="
+            cat work/focused/painter-code.txt || true
+            echo
+            echo "=== Decompile files ==="
+            find work/decompile -type f | sort || true
+          } > work/focused/REPORT.txt
+
+          cat work/focused/REPORT.txt
+
+      - name: Upload complete AOT analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-analysis
+          if-no-files-found: error
+          path: |
+            work/info.json
+            work/info.raw
+            work/info.stderr
+            work/snapshot_hash
+            work/adapter-install.json
+            work/adapter-install.stderr
+            work/adapter-list.json
+            work/adapter-list.stderr
+            work/native/libapp.so
+            work/decompile.raw
+            work/decompile.stderr
+            work/decompile/**
+            work/focused/**
+
+এবার workflow-টা APK merge করবে না, কারণ "flutterdec" সরাসরি "libapp.so" নিতে পারে।
+
+আর "decompile" exit code "1" হলেও artifact থাকলে workflow-কে সফল ধরা হয়েছে—কারণ Flutterdec-এর strict quality gate বাস্তব Flutter app-এ non-zero দিতে পারে, অথচ useful artifacts লিখে দিতে পারে।
+
+এবার লক্ষ্য: সবুজ run + "FlashFy-AOT-analysis" artifact। তারপর সেই artifact থেকেই lamp-এর actual function বের করে final installable APK patch-এর দিকে যাব।
+
+তুমি কোনটা চাও—AOT analysis আগে, নাকি সরাসরি final APK patch workflow?
