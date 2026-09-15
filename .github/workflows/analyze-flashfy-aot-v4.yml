@@ -11,25 +11,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check APK input
+      - name: Check input
         shell: bash
         run: |
           set -e
 
-          echo "Checking FlashFy APK..."
-
           test -f split_config.arm64_v8a.apk
 
           mkdir -p work/native
+          mkdir -p work/flutterdec
 
-          echo "APK input OK"
+          echo "Input APK found."
 
       - name: Extract libapp.so
         shell: bash
         run: |
           set -e
-
-          echo "Extracting Flutter libapp.so..."
 
           unzip -p \
             split_config.arm64_v8a.apk \
@@ -38,85 +35,224 @@ jobs:
 
           test -s work/native/libapp.so
 
-          echo "libapp.so extracted successfully"
+          echo "libapp.so:"
           ls -lh work/native/libapp.so
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Detect AOT snapshot
+      - name: Download flutterdec release
         shell: bash
         run: |
           set -e
 
-          mkdir -p work
+          VERSION="v0.1.0-alpha.4"
 
-          echo "======================================"
-          echo "Flutterdec version"
-          echo "======================================"
+          URL="https://github.com/caverav/flutterdec/releases/download/${VERSION}/flutterdec-${VERSION}-Linux-X64.tar.gz"
 
-          nix run github:caverav/flutterdec -- \
-            --version || true
+          echo "Downloading:"
+          echo "$URL"
+
+          curl -fL \
+            "$URL" \
+            -o work/flutterdec.tar.gz
+
+          test -s work/flutterdec.tar.gz
+
+          tar -xzf \
+            work/flutterdec.tar.gz \
+            -C work/flutterdec
 
           echo
+          echo "flutterdec files:"
+          find work/flutterdec -maxdepth 4 -type f -print
+
+      - name: Locate flutterdec
+        shell: bash
+        run: |
+          set -e
+
+          BIN="$(find work/flutterdec -type f -path '*/bin/flutterdec' | head -1)"
+
+          if [ -z "$BIN" ]; then
+            echo "ERROR: flutterdec binary not found."
+            find work/flutterdec -type f -print
+            exit 1
+          fi
+
+          chmod +x "$BIN"
+
+          echo "FLUTTERDEC_BIN=$PWD/$BIN" >> "$GITHUB_ENV"
+
+          echo "Flutterdec:"
+          "$PWD/$BIN" --version
+
+      - name: Detect AOT snapshot
+        shell: bash
+        run: |
+          set +e
+
           echo "======================================"
           echo "Flutterdec info"
           echo "======================================"
 
-          set +e
+          "$FLUTTERDEC_BIN" \
+            info \
+            work/native/libapp.so \
+            --json \
+            > work/info.raw \
+            2> work/info.stderr
 
-          nix run github:caverav/flutterdec -- \
-            info work/native/libapp.so --json \
-            2>&1 | tee work/flutterdec-info.log
-
-          RC=${PIPESTATUS[0]}
+          RC=$?
 
           set -e
 
+          echo "flutterdec exit code: $RC"
+
           echo
-          echo "flutterdec info exit code: $RC"
+          echo "========== STDOUT =========="
+          cat work/info.raw || true
+
+          echo
+          echo "========== STDERR =========="
+          cat work/info.stderr || true
 
           echo
           echo "======================================"
-          echo "Searching snapshot hash"
+          echo "Extracting snapshot hash"
           echo "======================================"
 
-          HASH=$(
+          HASH="$(
             grep -oE \
               '"snapshot_hash"[[:space:]]*:[[:space:]]*"[^"]+"' \
-              work/flutterdec-info.log \
+              work/info.raw \
               | head -1 \
               | sed -E \
               's/.*"snapshot_hash"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-          )
+          )"
 
+          if [ -z "$HASH" ]; then
+            HASH="$(
+              grep -oE \
+                '"snapshot_hash"[[:space:]]*:[[:space:]]*"[^"]+"' \
+                work/info.stderr \
+                | head -1 \
+                | sed -E \
+                's/.*"snapshot_hash"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+            )"
+          fi
+
+          echo
           echo "Detected snapshot hash: $HASH"
 
           if [ -z "$HASH" ]; then
             echo
-            echo "ERROR: snapshot_hash was not found."
+            echo "ERROR: Could not detect snapshot hash."
             echo
-            echo "Complete flutterdec output:"
-            cat work/flutterdec-info.log
+            echo "Raw output:"
+            cat work/info.raw || true
+            echo
+            echo "Error output:"
+            cat work/info.stderr || true
             exit 1
           fi
 
           echo "$HASH" > work/snapshot_hash
 
           echo
-          echo "Snapshot hash:"
+          echo "Detected:"
           cat work/snapshot_hash
 
           echo
-          echo "Expected FlashFy snapshot hash:"
+          echo "Expected:"
           echo "78da37fed6bf1489361a312568249f3f"
 
           if [ "$HASH" != "78da37fed6bf1489361a312568249f3f" ]; then
             echo
-            echo "ERROR: Unexpected snapshot hash."
+            echo "ERROR: Snapshot hash does not match FlashFy."
             exit 1
           fi
 
-         
+          echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
+
+          echo
+          echo "Snapshot hash confirmed."
+
+      - name: Install AOT adapter
+        shell: bash
+        env:
+          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
+        run: |
+          set -e
+
+          mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
+
+          echo "======================================"
+          echo "Installing adapter"
+          echo "======================================"
+
+          "$FLUTTERDEC_BIN" \
+            adapter install \
+            --dart-hash "$SNAPSHOT_HASH" \
+            > work/adapter-install.raw \
+            2> work/adapter-install.stderr
+
+          echo
+          echo "Adapter install output:"
+          cat work/adapter-install.raw || true
+
+          echo
+          echo "Adapter install stderr:"
+          cat work/adapter-install.stderr || true
+
+          echo
+          echo "======================================"
+          echo "Adapter list"
+          echo "======================================"
+
+          "$FLUTTERDEC_BIN" \
+            adapter list \
+            --json \
+            > work/adapter-list.raw \
+            2> work/adapter-list.stderr || true
+
+          cat work/adapter-list.raw || true
+          cat work/adapter-list.stderr || true
+
+      - name: Decompile AOT
+        shell: bash
+        env:
+          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
+        run: |
+          set +e
+
+          mkdir -p work/decompile
+
+          echo "======================================"
+          echo "Decompiling FlashFy"
+          echo "======================================"
+
+          "$FLUTTERDEC_BIN" \
+            decompile \
+            work/native/libapp.so \
+            -o work/decompile \
+            --emit-asm \
+            --emit-ir \
+            --function-scope all \
+            > work/decompile.raw \
+            2> work/decompile.stderr
+
+          RC=$?
+
+          set -e
+
+          echo
+          echo "Decompile exit code: $RC"
+
+          echo
+          echo "========== STDERR =========="
+          cat work/decompile.stderr || true
+
+          echo
+          echo "========== STDOUT =========="
+          cat work/decompile.raw || true
+
+          echo
+          echo "========== FILES =========="
