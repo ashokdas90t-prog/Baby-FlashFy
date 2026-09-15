@@ -256,3 +256,96 @@ jobs:
 
           echo
           echo "========== FILES =========="
+          find work/decompile -type f -print || true
+
+          COUNT="$(
+            find work/decompile -type f | wc -l
+          )"
+
+          echo
+          echo "Artifact count: $COUNT"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Decompile produced artifacts."
+            exit 0
+          fi
+
+          exit "$RC"
+
+      - name: Search painter functions
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work/focused
+
+          echo "======================================"
+          echo "Searching libapp.so strings"
+          echo "======================================"
+
+          strings -t x work/native/libapp.so \
+            | grep -E \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
+            > work/focused/painter-strings.txt || true
+
+          cat work/focused/painter-strings.txt || true
+
+          echo
+          echo "======================================"
+          echo "Searching decompiled code"
+          echo "======================================"
+
+          grep -RniE \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
+            work/decompile \
+            > work/focused/painter-code.txt || true
+
+          cat work/focused/painter-code.txt || true
+
+      - name: Create report
+        shell: bash
+        run: |
+          set -e
+
+          {
+            echo "FlashFy Flutter AOT Analysis"
+            echo
+            echo "Snapshot hash:"
+            cat work/snapshot_hash || true
+
+            echo
+            echo "Painter strings:"
+            cat work/focused/painter-strings.txt || true
+
+            echo
+            echo "Painter code:"
+            cat work/focused/painter-code.txt || true
+
+            echo
+            echo "Decompile stderr:"
+            cat work/decompile.stderr || true
+
+          } > REPORT.txt
+
+          cat REPORT.txt
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-analysis
+          if-no-files-found: error
+          path: |
+            REPORT.txt
+            work/flutterdec.tar.gz
+            work/info.raw
+            work/info.stderr
+            work/snapshot_hash
+            work/adapter-install.raw
+            work/adapter-install.stderr
+            work/adapter-list.raw
+            work/adapter-list.stderr
+            work/native/libapp.so
+            work/decompile.raw
+            work/decompile.stderr
+            work/decompile/**
+            work/focused/**
