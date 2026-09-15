@@ -11,22 +11,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check input
+      - name: Check FlashFy input
         shell: bash
         run: |
           set -e
+
+          echo "Checking FlashFy files..."
 
           test -f split_config.arm64_v8a.apk
 
           mkdir -p work/native
           mkdir -p work/flutterdec
 
-          echo "Input APK found."
+          echo "Input OK"
 
       - name: Extract libapp.so
         shell: bash
         run: |
           set -e
+
+          echo "Extracting libapp.so..."
 
           unzip -p \
             split_config.arm64_v8a.apk \
@@ -35,54 +39,104 @@ jobs:
 
           test -s work/native/libapp.so
 
-          echo "libapp.so:"
+          echo "libapp.so extracted:"
           ls -lh work/native/libapp.so
 
-      - name: Download flutterdec release
+      - name: Download flutterdec
         shell: bash
         run: |
           set -e
 
           VERSION="v0.1.0-alpha.4"
 
-          URL="https://github.com/caverav/flutterdec/releases/download/${VERSION}/flutterdec-${VERSION}-Linux-X64.tar.gz"
+          URL="https://github.com/caverav/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz"
 
-          echo "Downloading:"
+          echo "Downloading flutterdec..."
           echo "$URL"
 
           curl -fL \
+            --retry 3 \
+            --retry-delay 2 \
             "$URL" \
             -o work/flutterdec.tar.gz
 
           test -s work/flutterdec.tar.gz
+
+          echo "Download successful."
+
+          echo "Extracting flutterdec..."
 
           tar -xzf \
             work/flutterdec.tar.gz \
             -C work/flutterdec
 
           echo
-          echo "flutterdec files:"
-          find work/flutterdec -maxdepth 4 -type f -print
+          echo "Extracted files:"
+          find work/flutterdec -maxdepth 5 -type f -print
 
       - name: Locate flutterdec
         shell: bash
         run: |
           set -e
 
-          BIN="$(find work/flutterdec -type f -path '*/bin/flutterdec' | head -1)"
+          echo "Searching flutterdec binary..."
+
+          BIN="$(find work/flutterdec -type f -name flutterdec | head -1)"
 
           if [ -z "$BIN" ]; then
             echo "ERROR: flutterdec binary not found."
-            find work/flutterdec -type f -print
+
+            echo
+            echo "Directory tree:"
+            find work/flutterdec -maxdepth 6 -print
+
             exit 1
           fi
 
           chmod +x "$BIN"
 
+          echo "Found:"
+          echo "$BIN"
+
           echo "FLUTTERDEC_BIN=$PWD/$BIN" >> "$GITHUB_ENV"
 
-          echo "Flutterdec:"
+          echo
+          echo "flutterdec version:"
           "$PWD/$BIN" --version
+
+      - name: Verify flutterdec data
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking flutterdec installation..."
+
+          BIN="$FLUTTERDEC_BIN"
+
+          DATA_DIR="$(dirname "$BIN")/../share/flutterdec"
+
+          echo "Binary:"
+          echo "$BIN"
+
+          echo
+          echo "Expected data directory:"
+          echo "$DATA_DIR"
+
+          if [ ! -f "$DATA_DIR/adapters/registry.json" ]; then
+            echo
+            echo "WARNING: registry.json not found at:"
+            echo "$DATA_DIR"
+
+            echo
+            echo "Searching for registry.json..."
+
+            find work/flutterdec \
+              -name registry.json \
+              -print
+          else
+            echo
+            echo "registry.json found."
+          fi
 
       - name: Detect AOT snapshot
         shell: bash
@@ -104,14 +158,15 @@ jobs:
 
           set -e
 
-          echo "flutterdec exit code: $RC"
+          echo
+          echo "flutterdec info exit code: $RC"
 
           echo
-          echo "========== STDOUT =========="
+          echo "========== INFO STDOUT =========="
           cat work/info.raw || true
 
           echo
-          echo "========== STDERR =========="
+          echo "========== INFO STDERR =========="
           cat work/info.stderr || true
 
           echo
@@ -140,40 +195,44 @@ jobs:
           fi
 
           echo
-          echo "Detected snapshot hash: $HASH"
+          echo "Detected snapshot hash:"
+          echo "$HASH"
 
           if [ -z "$HASH" ]; then
             echo
-            echo "ERROR: Could not detect snapshot hash."
+            echo "ERROR: snapshot_hash not found."
+
             echo
-            echo "Raw output:"
+            echo "Complete stdout:"
             cat work/info.raw || true
+
             echo
-            echo "Error output:"
+            echo "Complete stderr:"
             cat work/info.stderr || true
+
             exit 1
           fi
 
           echo "$HASH" > work/snapshot_hash
 
           echo
-          echo "Detected:"
-          cat work/snapshot_hash
+          echo "Expected FlashFy hash:"
+          echo "78da37fed6bf1489361a312568249f3f"
 
           echo
-          echo "Expected:"
-          echo "78da37fed6bf1489361a312568249f3f"
+          echo "Detected FlashFy hash:"
+          cat work/snapshot_hash
 
           if [ "$HASH" != "78da37fed6bf1489361a312568249f3f" ]; then
             echo
-            echo "ERROR: Snapshot hash does not match FlashFy."
+            echo "ERROR: Snapshot hash mismatch."
             exit 1
           fi
 
           echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
 
           echo
-          echo "Snapshot hash confirmed."
+          echo "Snapshot confirmed successfully."
 
       - name: Install AOT adapter
         shell: bash
@@ -185,17 +244,18 @@ jobs:
           mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
 
           echo "======================================"
-          echo "Installing adapter"
+          echo "Installing AOT adapter"
           echo "======================================"
 
           "$FLUTTERDEC_BIN" \
             adapter install \
             --dart-hash "$SNAPSHOT_HASH" \
+            --json \
             > work/adapter-install.raw \
             2> work/adapter-install.stderr
 
           echo
-          echo "Adapter install output:"
+          echo "Adapter install:"
           cat work/adapter-install.raw || true
 
           echo
@@ -211,12 +271,15 @@ jobs:
             adapter list \
             --json \
             > work/adapter-list.raw \
-            2> work/adapter-list.stderr || true
+            2> work/adapter-list.stderr
 
+          echo
           cat work/adapter-list.raw || true
+
+          echo
           cat work/adapter-list.stderr || true
 
-      - name: Decompile AOT
+      - name: Decompile FlashFy AOT
         shell: bash
         env:
           FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
@@ -247,15 +310,15 @@ jobs:
           echo "Decompile exit code: $RC"
 
           echo
-          echo "========== STDERR =========="
+          echo "========== DECOMPILE STDERR =========="
           cat work/decompile.stderr || true
 
           echo
-          echo "========== STDOUT =========="
+          echo "========== DECOMPILE STDOUT =========="
           cat work/decompile.raw || true
 
           echo
-          echo "========== FILES =========="
+          echo "========== GENERATED FILES =========="
           find work/decompile -type f -print || true
 
           COUNT="$(
@@ -263,16 +326,17 @@ jobs:
           )"
 
           echo
-          echo "Artifact count: $COUNT"
+          echo "Generated artifact count: $COUNT"
 
           if [ "$COUNT" -gt 0 ]; then
-            echo "Decompile produced artifacts."
+            echo "Decompile artifacts found."
             exit 0
           fi
 
+          echo "No decompile artifacts found."
           exit "$RC"
 
-      - name: Search painter functions
+      - name: Search FlashFy painter
         shell: bash
         run: |
           set -e
@@ -280,7 +344,7 @@ jobs:
           mkdir -p work/focused
 
           echo "======================================"
-          echo "Searching libapp.so strings"
+          echo "Searching painter symbols"
           echo "======================================"
 
           strings -t x work/native/libapp.so \
@@ -288,6 +352,7 @@ jobs:
             '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
             > work/focused/painter-strings.txt || true
 
+          echo
           cat work/focused/painter-strings.txt || true
 
           echo
@@ -300,6 +365,7 @@ jobs:
             work/decompile \
             > work/focused/painter-code.txt || true
 
+          echo
           cat work/focused/painter-code.txt || true
 
       - name: Create report
