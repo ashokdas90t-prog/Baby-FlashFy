@@ -15,382 +15,116 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          echo "Checking FlashFy files..."
-
           test -f split_config.arm64_v8a.apk
-
           mkdir -p work/native
-          mkdir -p work/flutterdec
-
-          echo "Input OK"
+          echo "FlashFy input OK"
 
       - name: Extract libapp.so
         shell: bash
         run: |
           set -e
-
-          echo "Extracting libapp.so..."
-
           unzip -p \
             split_config.arm64_v8a.apk \
             lib/arm64-v8a/libapp.so \
             > work/native/libapp.so
-
           test -s work/native/libapp.so
-
-          echo "libapp.so extracted:"
           ls -lh work/native/libapp.so
 
-      - name: Download flutterdec
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build AOTopsy
         shell: bash
         run: |
           set -e
+          git clone --depth 1 https://github.com/BroNils/aotopsy.git work/aotopsy-src
+          cd work/aotopsy-src
+          make build
+          test -x ./aotopsy
+          ./aotopsy doctor ../native/libapp.so
 
-          VERSION="v0.1.0-alpha.4"
-
-          URL="https://github.com/caverav/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz"
-
-          echo "Downloading flutterdec..."
-          echo "$URL"
-
-          curl -fL \
-            --retry 3 \
-            --retry-delay 2 \
-            "$URL" \
-            -o work/flutterdec.tar.gz
-
-          test -s work/flutterdec.tar.gz
-
-          echo "Download successful."
-
-          echo "Extracting flutterdec..."
-
-          tar -xzf \
-            work/flutterdec.tar.gz \
-            -C work/flutterdec
-
-          echo
-          echo "Extracted files:"
-          find work/flutterdec -maxdepth 5 -type f -print
-
-      - name: Locate flutterdec
-        shell: bash
-        run: |
-          set -e
-
-          echo "Searching flutterdec binary..."
-
-          BIN="$(find work/flutterdec -type f -name flutterdec | head -1)"
-
-          if [ -z "$BIN" ]; then
-            echo "ERROR: flutterdec binary not found."
-
-            echo
-            echo "Directory tree:"
-            find work/flutterdec -maxdepth 6 -print
-
-            exit 1
-          fi
-
-          chmod +x "$BIN"
-
-          echo "Found:"
-          echo "$BIN"
-
-          echo "FLUTTERDEC_BIN=$PWD/$BIN" >> "$GITHUB_ENV"
-
-          echo
-          echo "flutterdec version:"
-          "$PWD/$BIN" --version
-
-      - name: Verify flutterdec data
-        shell: bash
-        run: |
-          set -e
-
-          echo "Checking flutterdec installation..."
-
-          BIN="$FLUTTERDEC_BIN"
-
-          DATA_DIR="$(dirname "$BIN")/../share/flutterdec"
-
-          echo "Binary:"
-          echo "$BIN"
-
-          echo
-          echo "Expected data directory:"
-          echo "$DATA_DIR"
-
-          if [ ! -f "$DATA_DIR/adapters/registry.json" ]; then
-            echo
-            echo "WARNING: registry.json not found at:"
-            echo "$DATA_DIR"
-
-            echo
-            echo "Searching for registry.json..."
-
-            find work/flutterdec \
-              -name registry.json \
-              -print
-          else
-            echo
-            echo "registry.json found."
-          fi
-
-      - name: Detect AOT snapshot
+      - name: Recover FlashFy functions
         shell: bash
         run: |
           set +e
+          mkdir -p work/aotopsy
 
-          echo "======================================"
-          echo "Flutterdec info"
-          echo "======================================"
-
-          "$FLUTTERDEC_BIN" \
-            info \
+          ./work/aotopsy-src/aotopsy \
             work/native/libapp.so \
-            --json \
-            > work/info.raw \
-            2> work/info.stderr
+            --out work/aotopsy \
+            --decompile
 
           RC=$?
 
           set -e
 
-          echo
-          echo "flutterdec info exit code: $RC"
+          echo "AOTopsy exit code: $RC"
+          find work/aotopsy -maxdepth 3 -type f -print | sort || true
 
-          echo
-          echo "========== INFO STDOUT =========="
-          cat work/info.raw || true
-
-          echo
-          echo "========== INFO STDERR =========="
-          cat work/info.stderr || true
-
-          echo
-          echo "======================================"
-          echo "Extracting snapshot hash"
-          echo "======================================"
-
-          HASH="$(
-            grep -oE \
-              '"snapshot_hash"[[:space:]]*:[[:space:]]*"[^"]+"' \
-              work/info.raw \
-              | head -1 \
-              | sed -E \
-              's/.*"snapshot_hash"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-          )"
-
-          if [ -z "$HASH" ]; then
-            HASH="$(
-              grep -oE \
-                '"snapshot_hash"[[:space:]]*:[[:space:]]*"[^"]+"' \
-                work/info.stderr \
-                | head -1 \
-                | sed -E \
-                's/.*"snapshot_hash"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-            )"
-          fi
-
-          echo
-          echo "Detected snapshot hash:"
-          echo "$HASH"
-
-          if [ -z "$HASH" ]; then
-            echo
-            echo "ERROR: snapshot_hash not found."
-
-            echo
-            echo "Complete stdout:"
-            cat work/info.raw || true
-
-            echo
-            echo "Complete stderr:"
-            cat work/info.stderr || true
-
-            exit 1
-          fi
-
-          echo "$HASH" > work/snapshot_hash
-
-          echo
-          echo "Expected FlashFy hash:"
-          echo "78da37fed6bf1489361a312568249f3f"
-
-          echo
-          echo "Detected FlashFy hash:"
-          cat work/snapshot_hash
-
-          if [ "$HASH" != "78da37fed6bf1489361a312568249f3f" ]; then
-            echo
-            echo "ERROR: Snapshot hash mismatch."
-            exit 1
-          fi
-
-          echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
-
-          echo
-          echo "Snapshot confirmed successfully."
-
-      - name: Install AOT adapter
-        shell: bash
-        env:
-          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
-        run: |
-          set -e
-
-          mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
-
-          echo "======================================"
-          echo "Installing AOT adapter"
-          echo "======================================"
-
-          "$FLUTTERDEC_BIN" \
-            adapter install \
-            --dart-hash "$SNAPSHOT_HASH" \
-            --json \
-            > work/adapter-install.raw \
-            2> work/adapter-install.stderr
-
-          echo
-          echo "Adapter install:"
-          cat work/adapter-install.raw || true
-
-          echo
-          echo "Adapter install stderr:"
-          cat work/adapter-install.stderr || true
-
-          echo
-          echo "======================================"
-          echo "Adapter list"
-          echo "======================================"
-
-          "$FLUTTERDEC_BIN" \
-            adapter list \
-            --json \
-            > work/adapter-list.raw \
-            2> work/adapter-list.stderr
-
-          echo
-          cat work/adapter-list.raw || true
-
-          echo
-          cat work/adapter-list.stderr || true
-
-      - name: Decompile FlashFy AOT
-        shell: bash
-        env:
-          FLUTTERDEC_ADAPTER_STORE: ${{ github.workspace }}/work/adapter-store
-        run: |
-          set +e
-
-          mkdir -p work/decompile
-
-          echo "======================================"
-          echo "Decompiling FlashFy"
-          echo "======================================"
-
-          "$FLUTTERDEC_BIN" \
-            decompile \
-            work/native/libapp.so \
-            -o work/decompile \
-            --emit-asm \
-            --emit-ir \
-            --function-scope all \
-            > work/decompile.raw \
-            2> work/decompile.stderr
-
-          RC=$?
-
-          set -e
-
-          echo
-          echo "Decompile exit code: $RC"
-
-          echo
-          echo "========== DECOMPILE STDERR =========="
-          cat work/decompile.stderr || true
-
-          echo
-          echo "========== DECOMPILE STDOUT =========="
-          cat work/decompile.raw || true
-
-          echo
-          echo "========== GENERATED FILES =========="
-          find work/decompile -type f -print || true
-
-          COUNT="$(
-            find work/decompile -type f | wc -l
-          )"
-
-          echo
-          echo "Generated artifact count: $COUNT"
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "Decompile artifacts found."
+          if find work/aotopsy -type f -print -quit | grep -q .; then
             exit 0
           fi
 
-          echo "No decompile artifacts found."
           exit "$RC"
 
-      - name: Search FlashFy painter
+      - name: Target painter functions
         shell: bash
         run: |
-          set -e
-
-          mkdir -p work/focused
-
-          echo "======================================"
-          echo "Searching painter symbols"
-          echo "======================================"
-
-          strings -t x work/native/libapp.so \
-            | grep -E \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
-            > work/focused/painter-strings.txt || true
-
-          echo
-          cat work/focused/painter-strings.txt || true
-
-          echo
-          echo "======================================"
-          echo "Searching decompiled code"
-          echo "======================================"
+          set +e
+          mkdir -p work/targeted
 
           grep -RniE \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|FlashfyScreen|_FlashfyScreenState' \
-            work/decompile \
-            > work/focused/painter-code.txt || true
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|_FlashfyScreenState|FlashfyScreen' \
+            work/aotopsy \
+            > work/targeted/function-matches.txt
 
-          echo
-          cat work/focused/painter-code.txt || true
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _RopeBulbPainter \
+            > work/targeted/ropebulb.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _BackgroundPainter \
+            > work/targeted/background.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _FlashfyScreenState \
+            > work/targeted/screenstate.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug strings \
+            --lib work/native/libapp.so \
+            --find _RopeBulbPainter \
+            --xref \
+            > work/targeted/ropebulb-xref.txt \
+            2>&1 || true
+
+          cat work/targeted/*.txt || true
 
       - name: Create report
         shell: bash
         run: |
-          set -e
-
           {
-            echo "FlashFy Flutter AOT Analysis"
+            echo "FlashFy AOT analysis"
             echo
-            echo "Snapshot hash:"
-            cat work/snapshot_hash || true
-
+            echo "Painter symbols:"
+            strings -t x work/native/libapp.so |
+              grep -E \
+              '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|_FlashfyScreenState|FlashfyScreen' \
+              || true
             echo
-            echo "Painter strings:"
-            cat work/focused/painter-strings.txt || true
-
-            echo
-            echo "Painter code:"
-            cat work/focused/painter-code.txt || true
-
-            echo
-            echo "Decompile stderr:"
-            cat work/decompile.stderr || true
-
+            echo "Targeted analysis:"
+            cat work/targeted/*.txt 2>/dev/null || true
           } > REPORT.txt
 
           cat REPORT.txt
@@ -398,20 +132,10 @@ jobs:
       - name: Upload analysis
         uses: actions/upload-artifact@v4
         with:
-          name: FlashFy-AOT-analysis
+          name: FlashFy-AOTopsy-analysis
           if-no-files-found: error
           path: |
             REPORT.txt
-            work/flutterdec.tar.gz
-            work/info.raw
-            work/info.stderr
-            work/snapshot_hash
-            work/adapter-install.raw
-            work/adapter-install.stderr
-            work/adapter-list.raw
-            work/adapter-list.stderr
             work/native/libapp.so
-            work/decompile.raw
-            work/decompile.stderr
-            work/decompile/**
-            work/focused/**
+            work/aotopsy/**
+            work/targeted/**
