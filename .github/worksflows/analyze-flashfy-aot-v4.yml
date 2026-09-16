@@ -1,0 +1,141 @@
+name: Analyze FlashFy Flutter AOT
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check FlashFy input
+        shell: bash
+        run: |
+          set -e
+          test -f split_config.arm64_v8a.apk
+          mkdir -p work/native
+          echo "FlashFy input OK"
+
+      - name: Extract libapp.so
+        shell: bash
+        run: |
+          set -e
+          unzip -p \
+            split_config.arm64_v8a.apk \
+            lib/arm64-v8a/libapp.so \
+            > work/native/libapp.so
+          test -s work/native/libapp.so
+          ls -lh work/native/libapp.so
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build AOTopsy
+        shell: bash
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/BroNils/aotopsy.git work/aotopsy-src
+          cd work/aotopsy-src
+          make build
+          test -x ./aotopsy
+          ./aotopsy doctor ../native/libapp.so
+
+      - name: Recover FlashFy functions
+        shell: bash
+        run: |
+          set +e
+          mkdir -p work/aotopsy
+
+          ./work/aotopsy-src/aotopsy \
+            work/native/libapp.so \
+            --out work/aotopsy \
+            --decompile
+
+          RC=$?
+
+          set -e
+
+          echo "AOTopsy exit code: $RC"
+          find work/aotopsy -maxdepth 3 -type f -print | sort || true
+
+          if find work/aotopsy -type f -print -quit | grep -q .; then
+            exit 0
+          fi
+
+          exit "$RC"
+
+      - name: Target painter functions
+        shell: bash
+        run: |
+          set +e
+          mkdir -p work/targeted
+
+          grep -RniE \
+            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|_FlashfyScreenState|FlashfyScreen' \
+            work/aotopsy \
+            > work/targeted/function-matches.txt
+
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _RopeBulbPainter \
+            > work/targeted/ropebulb.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _BackgroundPainter \
+            > work/targeted/background.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug decompile-native \
+            --lib work/native/libapp.so \
+            --find _FlashfyScreenState \
+            > work/targeted/screenstate.txt \
+            2>&1 || true
+
+          ./work/aotopsy-src/aotopsy \
+            _debug strings \
+            --lib work/native/libapp.so \
+            --find _RopeBulbPainter \
+            --xref \
+            > work/targeted/ropebulb-xref.txt \
+            2>&1 || true
+
+          cat work/targeted/*.txt || true
+
+      - name: Create report
+        shell: bash
+        run: |
+          {
+            echo "FlashFy AOT analysis"
+            echo
+            echo "Painter symbols:"
+            strings -t x work/native/libapp.so |
+              grep -E \
+              '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|isFlashOn|_FlashfyScreenState|FlashfyScreen' \
+              || true
+            echo
+            echo "Targeted analysis:"
+            cat work/targeted/*.txt 2>/dev/null || true
+          } > REPORT.txt
+
+          cat REPORT.txt
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOTopsy-analysis
+          if-no-files-found: error
+          path: |
+            REPORT.txt
+            work/native/libapp.so
+            work/aotopsy/**
+            work/targeted/**
