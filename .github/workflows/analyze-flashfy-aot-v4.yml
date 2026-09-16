@@ -9,273 +9,276 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 1. Checkout
+      # 1. Checkout repository
       # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2. Find the APK
+      # 2. Locate APK
       # ------------------------------------------------------------
       - name: Locate APK
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          mkdir -p analysis/apk analysis/out
+          echo "Repository files:"
+          find . -maxdepth 4 -type f | sort | sed -n '1,250p'
 
-          APK="$(find . -type f -name '*.apk' | head -1)"
+          APK="$(find . -type f -name '*.apk' | head -n 1 || true)"
 
           if [ -z "$APK" ]; then
-            echo "ERROR: No APK found in repository."
+            echo "ERROR: No APK file found."
             exit 1
           fi
 
-          echo "APK=$APK"
-          cp "$APK" analysis/apk/input.apk
-
-          unzip -l analysis/apk/input.apk | grep -E 'libapp\.so|libflutter\.so' || true
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "Using APK: $APK"
 
       # ------------------------------------------------------------
-      # 3. Extract ARM64 libapp.so
+      # 3. Extract ARM64 libapp.so from split APK
       # ------------------------------------------------------------
-      - name: Extract libapp.so
+      - name: Extract ARM64 libapp.so
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          mkdir -p analysis/apk/lib
+          rm -rf work
+          mkdir -p work/apk
 
-          unzip -j -o \
-            analysis/apk/input.apk \
-            'lib/arm64-v8a/libapp.so' \
-            -d analysis/apk/lib
+          echo "Extracting APK..."
+          unzip -q "$APK" -d work/apk
 
-          if [ ! -s analysis/apk/lib/libapp.so ]; then
-            echo "ERROR: ARM64 libapp.so was not found."
-            echo "APK contents:"
-            unzip -l analysis/apk/input.apk | grep 'lib/' || true
+          echo "Searching for libapp.so..."
+
+          LIBAPP="$(find work/apk -type f -path '*/lib/arm64-v8a/libapp.so' | head -n 1 || true)"
+
+          if [ -z "$LIBAPP" ]; then
+            echo "libapp.so was not found inside this APK."
+            echo
+            echo "Searching all files:"
+            find work/apk -type f | grep -E 'libapp|arm64|apk' || true
             exit 1
           fi
 
-          file analysis/apk/lib/libapp.so
-          ls -lh analysis/apk/lib/libapp.so
+          cp "$LIBAPP" work/libapp.so
+
+          echo "Extracted:"
+          ls -lh work/libapp.so
+
+          file work/libapp.so
 
       # ------------------------------------------------------------
-      # 4. Download CORRECT flutterdec release
+      # 4. Install Flutterdec alpha.4
       # ------------------------------------------------------------
-      - name: Install flutterdec alpha.4
+      - name: Download Flutterdec alpha.4
         shell: bash
         run: |
-          set -eux
+          set -e
 
           VERSION="v0.1.0-alpha.4"
           URL="https://github.com/caverav/flutterdec/releases/download/${VERSION}/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz"
 
+          echo "Downloading:"
+          echo "$URL"
+
+          curl -L \
+            --fail \
+            --retry 5 \
+            --retry-delay 2 \
+            -o /tmp/flutterdec.tar.gz \
+            "$URL"
+
           mkdir -p /opt/flutterdec
 
-          curl -fL --retry 5 --retry-delay 2 \
-            "$URL" \
-            -o /tmp/flutterdec.tar.gz
-
           tar -xzf /tmp/flutterdec.tar.gz \
-            -C /opt/flutterdec
+            -C /opt/flutterdec \
+            --strip-components=1
 
-          echo "flutterdec files:"
-          find /opt/flutterdec -maxdepth 4 -type f -print | sort
+          echo "Flutterdec installation:"
+          find /opt/flutterdec -maxdepth 3 -type f | sort | sed -n '1,200p'
 
-          FLUTTERDEC_BIN="$(find /opt/flutterdec -type f -path '*/bin/flutterdec' | head -1)"
+          test -x /opt/flutterdec/bin/flutterdec
 
-          if [ -z "$FLUTTERDEC_BIN" ]; then
-            echo "ERROR: flutterdec binary not found."
-            exit 1
-          fi
+          /opt/flutterdec/bin/flutterdec --version || true
 
-          chmod +x "$FLUTTERDEC_BIN"
-
-          echo "FLUTTERDEC_BIN=$FLUTTERDEC_BIN" \
-            | tee analysis/out/flutterdec-path.txt
-
-          "$FLUTTERDEC_BIN" --version || true
+          echo "FLUTTERDEC=/opt/flutterdec/bin/flutterdec" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------
-      # 5. flutterdec INFO
+      # 5. Flutterdec info
       # ------------------------------------------------------------
-      - name: Inspect Flutter AOT metadata
+      - name: Flutterdec info
         shell: bash
         run: |
-          set -eux
+          set +e
 
-          FLUTTERDEC_BIN="$(cat analysis/out/flutterdec-path.txt | sed 's/^FLUTTERDEC_BIN=//')"
+          mkdir -p work/info
 
-          "$FLUTTERDEC_BIN" info \
-            analysis/apk/lib/libapp.so \
-            --json \
-            > analysis/out/flutterdec-info.json
+          "$FLUTTERDEC" info work/libapp.so --json \
+            > work/info/flutterdec-info.json 2>&1
 
-          cat analysis/out/flutterdec-info.json
+          STATUS=$?
+
+          echo "flutterdec info exit code: $STATUS"
+          cat work/info/flutterdec-info.json || true
+
+          # Do not stop here. We want the diagnostic artifact even
+          # when flutterdec returns a non-zero status.
+          exit 0
 
       # ------------------------------------------------------------
-      # 6. Extract snapshot hash
+      # 6. Detect Dart snapshot hash
       # ------------------------------------------------------------
       - name: Detect Dart snapshot hash
         shell: bash
         run: |
-          set -eux
+          set +e
 
-          python3 <<'PY'
-          import json
+          INFO="work/info/flutterdec-info.json"
 
-          path = "analysis/out/flutterdec-info.json"
+          echo "Searching snapshot hash..."
 
-          with open(path, "r", encoding="utf-8") as f:
-              data = json.load(f)
+          HASH=""
 
-          print("=== flutterdec info ===")
-          print(json.dumps(data, indent=2))
+          if [ -f "$INFO" ]; then
+            HASH="$(grep -Eo '[0-9a-fA-F]{32,64}' "$INFO" | head -n 1 || true)"
+          fi
 
-          candidates = []
+          if [ -z "$HASH" ]; then
+            echo "No hash found in JSON output."
+            echo
+            echo "Trying strings from libapp.so..."
 
-          def walk(value):
-              if isinstance(value, dict):
-                  for key, val in value.items():
-                      if "hash" in key.lower() and isinstance(val, str):
-                          candidates.append((key, val))
-                      walk(val)
+            HASH="$(
+              strings work/libapp.so |
+              grep -Eio '[0-9a-f]{32,64}' |
+              head -n 1 ||
+              true
+            )"
+          fi
 
-              elif isinstance(value, list):
-                  for item in value:
-                      walk(item)
+          if [ -z "$HASH" ]; then
+            echo "WARNING: Snapshot hash could not be detected automatically."
+            echo "SNAPSHOT_HASH=" >> "$GITHUB_ENV"
+          else
+            HASH="$(echo "$HASH" | tr '[:upper:]' '[:lower:]')"
 
-          walk(data)
+            echo "Detected hash: $HASH"
 
-          print("\n=== HASH CANDIDATES ===")
-
-          for key, value in candidates:
-              print(f"{key}: {value}")
-
-          snapshot_hash = None
-
-          if isinstance(data, dict):
-              snapshot_hash = data.get("snapshot_hash")
-
-          if not snapshot_hash:
-              for key, value in candidates:
-                  if key.lower() == "snapshot_hash":
-                      snapshot_hash = value
-                      break
-
-          if not snapshot_hash:
-              print("WARNING: snapshot_hash not found automatically.")
-          else:
-              print(f"Detected snapshot_hash: {snapshot_hash}")
-
-              with open(
-                  "analysis/out/dart-snapshot-hash.txt",
-                  "w",
-                  encoding="utf-8"
-              ) as f:
-                  f.write(snapshot_hash + "\n")
-          PY
-
-          cat analysis/out/dart-snapshot-hash.txt 2>/dev/null || true
+            echo "SNAPSHOT_HASH=$HASH" >> "$GITHUB_ENV"
+          fi
 
       # ------------------------------------------------------------
-      # 7. Adapter store
+      # 7. Prepare writable adapter store
       # ------------------------------------------------------------
-      - name: Prepare flutterdec adapter store
+      - name: Prepare Flutterdec adapter store
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          mkdir -p analysis/adapter-store
+          mkdir -p work/flutterdec-adapters
 
-          echo "FLUTTERDEC_ADAPTER_STORE=$PWD/analysis/adapter-store" \
+          echo "FLUTTERDEC_ADAPTER_STORE=$GITHUB_WORKSPACE/work/flutterdec-adapters" \
             >> "$GITHUB_ENV"
+
+          echo "FLUTTERDEC_DATA_DIR=/opt/flutterdec/share/flutterdec" \
+            >> "$GITHUB_ENV"
+
+          echo "Adapter store:"
+          find work/flutterdec-adapters -maxdepth 3 -type f -print || true
 
       # ------------------------------------------------------------
       # 8. Install matching adapter
       # ------------------------------------------------------------
-      - name: Install matching Dart adapter
+      - name: Install Flutterdec adapter
         shell: bash
         run: |
-          set -eux
+          set +e
 
-          FLUTTERDEC_BIN="$(cat analysis/out/flutterdec-path.txt | sed 's/^FLUTTERDEC_BIN=//')"
+          mkdir -p work/adapter
 
-          if [ ! -s analysis/out/dart-snapshot-hash.txt ]; then
-            echo "No snapshot hash detected."
-            echo "Continuing with flutterdec internal backend."
+          if [ -z "${SNAPSHOT_HASH:-}" ]; then
+            echo "Snapshot hash is empty."
+            echo "Skipping automatic adapter installation."
+
+            cat > work/adapter/adapter-status.txt <<'EOF'
+          Snapshot hash was not detected automatically.
+          Adapter installation was skipped.
+          EOF
+
             exit 0
           fi
 
-          HASH="$(tr -d '[:space:]' < analysis/out/dart-snapshot-hash.txt)"
-
           echo "Installing adapter for:"
-          echo "$HASH"
+          echo "$SNAPSHOT_HASH"
 
-          "$FLUTTERDEC_BIN" adapter install \
-            --dart-hash "$HASH" \
-            --target-arch arm64 \
-            > analysis/out/adapter-install.txt 2>&1 || true
-
-          cat analysis/out/adapter-install.txt
-
-          "$FLUTTERDEC_BIN" adapter list \
-            > analysis/out/adapter-list.txt 2>&1 || true
-
-          cat analysis/out/adapter-list.txt
-
-      # ------------------------------------------------------------
-      # 9. Decompile using adapter
-      # ------------------------------------------------------------
-      - name: flutterdec decompile
-        shell: bash
-        run: |
-          set -eux
-
-          FLUTTERDEC_BIN="$(cat analysis/out/flutterdec-path.txt | sed 's/^FLUTTERDEC_BIN=//')"
-
-          mkdir -p analysis/out/flutterdec
-
-          set +e
-
-          "$FLUTTERDEC_BIN" decompile \
-            analysis/apk/lib/libapp.so \
-            -o analysis/out/flutterdec \
-            --emit-asm \
-            --emit-ir \
-            --function-scope all
+          "$FLUTTERDEC" adapter install \
+            --dart-hash "$SNAPSHOT_HASH" \
+            --json \
+            > work/adapter/install.json 2>&1
 
           STATUS=$?
 
-          set -e
+          echo "Adapter installation exit code: $STATUS"
 
-          echo "flutterdec exit code: $STATUS" \
-            | tee analysis/out/flutterdec-exit-code.txt
+          cat work/adapter/install.json || true
 
-          # flutterdec may intentionally return non-zero because
-          # its strict quality gate rejects placeholder IFs.
-          # The generated artifacts are still useful.
-          if [ "$STATUS" -ne 0 ]; then
-            echo "flutterdec returned non-zero."
-            echo "Checking whether artifacts were produced..."
-          fi
+          "$FLUTTERDEC" adapter list \
+            > work/adapter/list.txt 2>&1 || true
 
-          find analysis/out/flutterdec \
-            -maxdepth 5 \
-            -type f \
-            -print \
-            | sort \
-            | head -1000
+          echo
+          echo "Installed adapters:"
+          cat work/adapter/list.txt || true
+
+          # Do not fail the complete diagnostic workflow here.
+          exit 0
 
       # ------------------------------------------------------------
-      # 10. Install static analysis dependencies
+      # 9. Decompile with Flutterdec
       # ------------------------------------------------------------
-      - name: Install AOT analysis dependencies
+      - name: Decompile Flutter AOT snapshot
         shell: bash
         run: |
-          set -eux
+          set +e
+
+          mkdir -p work/flutterdec-out
+
+          echo "Starting Flutterdec decompilation..."
+
+          "$FLUTTERDEC" decompile \
+            work/libapp.so \
+            -o work/flutterdec-out \
+            --emit-asm \
+            --emit-ir \
+            --function-scope all \
+            > work/flutterdec-out/decompile.log 2>&1
+
+          STATUS=$?
+
+          echo "Flutterdec decompile exit code: $STATUS"
+
+          cat work/flutterdec-out/decompile.log || true
+
+          echo
+          echo "Generated Flutterdec files:"
+          find work/flutterdec-out \
+            -maxdepth 5 \
+            -type f \
+            -printf '%p %s bytes\n' \
+            | sort \
+            | sed -n '1,400p'
+
+          # Flutterdec can return non-zero because of its quality gate
+          # even when useful artifacts have already been generated.
+          exit 0
+
+      # ------------------------------------------------------------
+      # 10. Install Python dependencies
+      # ------------------------------------------------------------
+      - name: Install analysis dependencies
+        shell: bash
+        run: |
+          set -e
 
           python3 -m pip install --upgrade pip
 
@@ -286,190 +289,422 @@ jobs:
       # ------------------------------------------------------------
       # 11. Clone AOTopsy
       # ------------------------------------------------------------
-      - name: Install AOTopsy
+      - name: Clone AOTopsy
         shell: bash
         run: |
-          set -eux
+          set -e
+
+          rm -rf work/aotopsy
 
           git clone \
             --depth 1 \
             https://github.com/BroNils/aotopsy.git \
-            analysis/aotopsy
+            work/aotopsy
 
-          python3 -m pip install -e analysis/aotopsy \
-            > analysis/out/aotopsy-install.txt 2>&1 \
-            || true
-
-          cat analysis/out/aotopsy-install.txt
+          echo "AOTopsy repository:"
+          find work/aotopsy -maxdepth 3 -type f | sort | sed -n '1,300p'
 
       # ------------------------------------------------------------
-      # 12. Run AOTopsy
+      # 12. Install AOTopsy
+      # ------------------------------------------------------------
+      - name: Install AOTopsy
+        shell: bash
+        run: |
+          set +e
+
+          cd work/aotopsy
+
+          if [ -f requirements.txt ]; then
+            python3 -m pip install -r requirements.txt
+          fi
+
+          if [ -f pyproject.toml ]; then
+            python3 -m pip install .
+          elif [ -f setup.py ]; then
+            python3 -m pip install .
+          fi
+
+          echo "Installed AOTopsy."
+
+          python3 -m aotopsy --help \
+            > "$GITHUB_WORKSPACE/work/aotopsy-help.txt" 2>&1 || true
+
+          cat "$GITHUB_WORKSPACE/work/aotopsy-help.txt" || true
+
+          exit 0
+
+      # ------------------------------------------------------------
+      # 13. Run AOTopsy
       # ------------------------------------------------------------
       - name: Analyze libapp.so with AOTopsy
         shell: bash
         run: |
-          set -eux
-
-          mkdir -p analysis/out/aotopsy
-
           set +e
 
-          if command -v aotopsy >/dev/null 2>&1; then
-            aotopsy \
-              analysis/apk/lib/libapp.so \
-              --output analysis/out/aotopsy
+          mkdir -p work/aotopsy-out
 
-            STATUS=$?
-          else
-            python3 -m aotopsy \
-              analysis/apk/lib/libapp.so \
-              --output analysis/out/aotopsy
+          echo "Trying AOTopsy module entrypoint..."
 
-            STATUS=$?
-          fi
+          python3 -m aotopsy \
+            work/libapp.so \
+            --output work/aotopsy-out \
+            > work/aotopsy-out/run.log 2>&1
 
-          set -e
+          STATUS=$?
 
-          echo "AOTopsy exit code: $STATUS" \
-            | tee analysis/out/aotopsy-exit-code.txt
+          echo "AOTopsy module exit code: $STATUS"
 
-          find analysis/out/aotopsy \
+          cat work/aotopsy-out/run.log || true
+
+          echo
+          echo "AOTopsy output:"
+          find work/aotopsy-out \
             -maxdepth 5 \
             -type f \
-            -print \
+            -printf '%p %s bytes\n' \
             | sort \
-            | head -1000
+            | sed -n '1,500p'
+
+          # Do not fail the workflow if the current AOTopsy CLI
+          # uses a different entrypoint.
+          exit 0
 
       # ------------------------------------------------------------
-      # 13. Extract Flutter-specific function names
+      # 14. Extract important FlashFy painter symbols
       # ------------------------------------------------------------
       - name: Extract FlashFy painter symbols
         shell: bash
         run: |
-          set -eux
+          set -e
 
-          strings -t x \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/strings.txt
+          mkdir -p work/symbols
 
-          grep -E \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|isFlashOn|toggleFlash|FlashfyController' \
-            analysis/out/strings.txt \
-            > analysis/out/flashfy-symbols.txt \
+          strings -a -t x work/libapp.so \
+            > work/symbols/all-strings.txt
+
+          grep -Ei \
+            'FlashfyScreen|FlashfyController|_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|toggleFlash|isFlashOn|TorchService|torch_service.dart|flashfy_screen.dart|flashfy_controller.dart' \
+            work/symbols/all-strings.txt \
+            > work/symbols/flashfy-symbols.txt \
             || true
 
-          cat analysis/out/flashfy-symbols.txt
+          echo "Important FlashFy strings:"
+          cat work/symbols/flashfy-symbols.txt || true
 
       # ------------------------------------------------------------
-      # 14. ELF structure
+      # 15. ELF information
       # ------------------------------------------------------------
-      - name: Extract ELF information
+      - name: Inspect ELF
         shell: bash
         run: |
-          set -eux
+          set +e
 
-          readelf -h \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/elf-header.txt
+          mkdir -p work/elf
 
-          readelf -S \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/elf-sections.txt
+          file work/libapp.so \
+            > work/elf/file.txt 2>&1
 
-          readelf -l \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/elf-program-headers.txt
+          readelf -h work/libapp.so \
+            > work/elf/header.txt 2>&1
 
-          readelf -Ws \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/elf-symbols.txt \
-            || true
+          readelf -S work/libapp.so \
+            > work/elf/sections.txt 2>&1
 
-          cat analysis/out/elf-header.txt
+          readelf -l work/libapp.so \
+            > work/elf/program-headers.txt 2>&1
 
-          grep -E \
-            '\.text|\.rodata' \
-            analysis/out/elf-sections.txt \
-            || true
+          readelf -s work/libapp.so \
+            > work/elf/symbol-table.txt 2>&1
+
+          echo "=== FILE ==="
+          cat work/elf/file.txt || true
+
+          echo
+          echo "=== ELF HEADER ==="
+          cat work/elf/header.txt || true
+
+          echo
+          echo "=== SECTIONS ==="
+          cat work/elf/sections.txt || true
+
+          echo
+          echo "=== PROGRAM HEADERS ==="
+          cat work/elf/program-headers.txt || true
+
+          echo
+          echo "=== SYMBOL TABLE ==="
+          cat work/elf/symbol-table.txt || true
+
+          exit 0
 
       # ------------------------------------------------------------
-      # 15. ARM64 disassembly
+      # 16. ARM64 disassembly
       # ------------------------------------------------------------
       - name: Generate ARM64 disassembly
         shell: bash
         run: |
-          set -eux
+          set +e
+
+          mkdir -p work/disassembly
 
           objdump \
             -d \
-            analysis/apk/lib/libapp.so \
-            > analysis/out/libapp-aarch64-objdump.txt \
-            || true
+            -M no-aliases \
+            work/libapp.so \
+            > work/disassembly/libapp-objdump.txt 2>&1
 
-          wc -c \
-            analysis/out/libapp-aarch64-objdump.txt \
-            || true
+          echo "Objdump generated."
+
+          wc -l work/disassembly/libapp-objdump.txt || true
+
+          exit 0
 
       # ------------------------------------------------------------
-      # 16. Search all recovered artifacts for our painter
+      # 17. Search all recovered artifacts for painter methods
       # ------------------------------------------------------------
-      - name: Locate FlashFy rendering path
+      - name: Search recovered AOT artifacts
         shell: bash
         run: |
-          set -eux
+          set +e
+
+          mkdir -p work/search
+
+          PATTERN='_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn'
+
+          echo "=== Flutterdec ===" \
+            > work/search/painter-search.txt
 
           grep -RniE \
-            '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|isFlashOn|toggleFlash' \
-            analysis/out \
-            > analysis/out/flashfy-all-references.txt \
-            || true
+            "$PATTERN" \
+            work/flutterdec-out \
+            >> work/search/painter-search.txt \
+            2>&1 || true
 
-          cat analysis/out/flashfy-all-references.txt \
-            | head -1000 \
-            || true
+          echo \
+            >> work/search/painter-search.txt
+
+          echo "=== AOTopsy ===" \
+            >> work/search/painter-search.txt
+
+          grep -RniE \
+            "$PATTERN" \
+            work/aotopsy-out \
+            >> work/search/painter-search.txt \
+            2>&1 || true
+
+          echo \
+            >> work/search/painter-search.txt
+
+          echo "=== Symbols ===" \
+            >> work/search/painter-search.txt
+
+          cat work/symbols/flashfy-symbols.txt \
+            >> work/search/painter-search.txt \
+            2>&1 || true
+
+          cat work/search/painter-search.txt
 
       # ------------------------------------------------------------
-      # 17. Generate a compact report
+      # 18. Search strings around known Flutter method names
       # ------------------------------------------------------------
-      - name: Generate analysis summary
+      - name: Extract nearby string context
         shell: bash
         run: |
-          set -eux
+          set +e
+
+          mkdir -p work/context
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("work/symbols/all-strings.txt")
+          out = Path("work/context/flutter-method-context.txt")
+
+          if not p.exists():
+              out.write_text("strings file missing\n")
+              raise SystemExit(0)
+
+          lines = p.read_text(errors="replace").splitlines()
+
+          patterns = [
+              "_RopeBulbPainter",
+              "_drawBulb",
+              "_drawPullRope",
+              "_BackgroundPainter",
+              "_paintBackgroundImage",
+              "_paintBackgroundColor",
+              "_drawImageScaledAndCentered",
+              "_FlashfyScreenState",
+              "FlashfyScreen",
+              "FlashfyController",
+              "toggleFlash",
+              "isFlashOn",
+              "TorchService",
+              "torch_service.dart",
+              "flashfy_screen.dart",
+              "flashfy_controller.dart",
+          ]
+
+          result = []
+
+          for i, line in enumerate(lines):
+              if any(x in line for x in patterns):
+                  start = max(0, i - 15)
+                  end = min(len(lines), i + 16)
+
+                  result.append(
+                      f"\n===== MATCH AT LINE {i + 1} =====\n"
+                  )
+
+                  result.extend(lines[start:end])
+
+          out.write_text(
+              "\n".join(result),
+              encoding="utf-8",
+              errors="replace",
+          )
+
+          print(out.read_text(errors="replace")[:50000])
+          PY
+
+          exit 0
+
+      # ------------------------------------------------------------
+      # 19. Check embedded Flutter assets
+      # ------------------------------------------------------------
+      - name: Inspect Flutter assets
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/assets
+
+          unzip -l "$APK" \
+            > work/assets/apk-file-list.txt 2>&1
+
+          grep -Ei \
+            'flutter_assets|flash_on|flash_off|flashlight|icon|AssetManifest' \
+            work/assets/apk-file-list.txt \
+            > work/assets/flutter-assets.txt \
+            || true
+
+          echo "Flutter assets:"
+          cat work/assets/flutter-assets.txt || true
+
+          exit 0
+
+      # ------------------------------------------------------------
+      # 20. Extract asset images for reference
+      # ------------------------------------------------------------
+      - name: Extract Flutter image assets
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/assets/extracted
+
+          unzip -j -o "$APK" \
+            'assets/flutter_assets/assets/*' \
+            -d work/assets/extracted \
+            > work/assets/extract-assets.log 2>&1 || true
+
+          find work/assets/extracted \
+            -type f \
+            -maxdepth 2 \
+            -printf '%f %s bytes\n' \
+            | sort \
+            > work/assets/extracted-list.txt
+
+          cat work/assets/extracted-list.txt || true
+
+          exit 0
+
+      # ------------------------------------------------------------
+      # 21. Build a compact diagnostic summary
+      # ------------------------------------------------------------
+      - name: Create final diagnostic summary
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/final
 
           {
-            echo "========================================"
+            echo "============================================================"
             echo "FlashFy Flutter AOT Analysis"
-            echo "========================================"
+            echo "============================================================"
+            echo
+            echo "Repository:"
+            echo "$GITHUB_REPOSITORY"
+            echo
+            echo "Commit:"
+            git rev-parse HEAD
             echo
             echo "APK:"
-            ls -lh analysis/apk/input.apk
-            echo
-            echo "libapp.so:"
-            ls -lh analysis/apk/lib/libapp.so
+            echo "$APK"
             echo
             echo "Snapshot hash:"
-            cat analysis/out/dart-snapshot-hash.txt 2>/dev/null || true
+            echo "${SNAPSHOT_HASH:-NOT DETECTED}"
             echo
-            echo "Painter symbols:"
-            cat analysis/out/flashfy-symbols.txt 2>/dev/null || true
+            echo "============================================================"
+            echo "FlashFy painter symbols"
+            echo "============================================================"
+            cat work/symbols/flashfy-symbols.txt 2>/dev/null || true
             echo
-            echo "========================================"
-            echo "Recovered artifacts"
-            echo "========================================"
-            find analysis/out \
-              -type f \
-              -printf '%p %s bytes\n' \
-              | sort
-          } | tee analysis/out/FINAL-ANALYSIS-SUMMARY.txt
+            echo "============================================================"
+            echo "Painter search"
+            echo "============================================================"
+            cat work/search/painter-search.txt 2>/dev/null || true
+            echo
+            echo "============================================================"
+            echo "Flutterdec decompile log"
+            echo "============================================================"
+            cat work/flutterdec-out/decompile.log 2>/dev/null || true
+            echo
+            echo "============================================================"
+            echo "AOTopsy log"
+            echo "============================================================"
+            cat work/aotopsy-out/run.log 2>/dev/null || true
+          } > work/final/FINAL-SUMMARY.txt
+
+          cat work/final/FINAL-SUMMARY.txt
 
       # ------------------------------------------------------------
-      # 18. Upload EVERYTHING
+      # 22. Create ZIP of ALL diagnostics
       # ------------------------------------------------------------
-      - name: Upload AOT diagnostics
+      - name: Package diagnostics
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          zip -r \
+            artifacts/FlashFy-AOT-Diagnostics.zip \
+            work \
+            > /tmp/zip.log 2>&1
+
+          echo "Diagnostic ZIP:"
+          ls -lh artifacts/FlashFy-AOT-Diagnostics.zip
+
+      # ------------------------------------------------------------
+      # 23. Upload diagnostics
+      # ------------------------------------------------------------
+      - name: Upload diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: flashfy-aot-diagnostics
-          path: |
-            analysis/out/**
+          name: FlashFy-AOT-Diagnostics
+          path: artifacts/FlashFy-AOT-Diagnostics.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # ------------------------------------------------------------
+      # 24. Upload raw analysis directory too
+      # ------------------------------------------------------------
+      - name: Upload raw analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-Raw-Analysis
+          path: work
           if-no-files-found: warn
           retention-days: 14
