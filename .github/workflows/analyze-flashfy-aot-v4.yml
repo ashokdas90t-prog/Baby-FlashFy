@@ -62,13 +62,16 @@ jobs:
         run: |
           set -e
           mkdir -p work/merge
-
-          java -jar APKEditor.jar m \
-            -i base.apk \
-            -i split_config.arm64_v8a.apk \
-            -i split_config.en.apk \
-            -i split_config.xxhdpi.apk \
-            -o work/FlashFy-merged.apk
+          
+            mkdir -p work/apks
+            cp base.apk work/apks/
+            cp split_config.arm64_v8a.apk work/apks/
+            cp split_config.en.apk work/apks/
+            cp split_config.xxhdpi.apk work/apks/
+            
+            java -jar APKEditor.jar m \
+            	-i work/apks \
+            	-o work/FlashFy-merged.apk
 
           test -s work/FlashFy-merged.apk
           ls -lh work/FlashFy-merged.apk
