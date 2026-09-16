@@ -1,474 +1,84 @@
-name: Build FlashFy - Baby Image ON
+name: analyze-flashfy-aot-v4
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
+  analyze-aot:
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Check input files
+      - name: Download Flutterdec alpha.4
         run: |
-          set -e
-          test -f base.apk
-          test -f split_config.arm64_v8a.apk
-          test -f split_config.en.apk
-          test -f split_config.xxhdpi.apk
-          test -f bg-fixed.png
-          echo "All input files found."
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools'
-
-      - name: Install Android build tools
+          set -eux
+          curl -L --fail --retry 3 -o /tmp/flutterdec.tar.gz https://github.com/JohnMurray/flutterdec/releases/download/v0.1.0-alpha.4/flutterdec-v0.1.0-alpha.4-linux-x64.tar.gz
+          mkdir -p /opt/flutterdec
+          tar -xzf /tmp/flutterdec.tar.gz -C /opt/flutterdec --strip-components=1
+          chmod +x /opt/flutterdec/bin/flutterdec
+      - name: Locate APK and extract libapp.so
         run: |
-          set -e
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Download APKEditor
+          set -eux
+          APK="$(find . -type f -name '*.apk' | head -1)"
+          test -n "$APK"
+          mkdir -p analysis/apk analysis/out
+          cp "$APK" analysis/apk/input.apk
+          unzip -j -o "$APK" 'lib/arm64-v8a/libapp.so' -d analysis/apk/
+          test -s analysis/apk/libapp.so
+          /opt/flutterdec/bin/flutterdec info analysis/apk/libapp.so --json > analysis/out/flutterdec-info.json || true
+      - name: Discover Dart hash and adapter status
         run: |
-          wget -q \
-            https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar \
-            -O APKEditor.jar
-
-      - name: Download Apktool
-        run: |
-          wget -q \
-            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.0/apktool_2.12.0.jar \
-            -O apktool.jar
-
-      - name: Merge split APKs
-        run: |
-          set -e
-
-          rm -rf work
-          mkdir -p work/apks
-
-          cp base.apk work/apks/
-          cp split_config.arm64_v8a.apk work/apks/
-          cp split_config.en.apk work/apks/
-          cp split_config.xxhdpi.apk work/apks/
-
-          java -jar APKEditor.jar m \
-            -i work/apks \
-            -o work/FlashFy-merged.apk
-
-          test -s work/FlashFy-merged.apk
-
-          echo "Merged APK created:"
-          ls -lh work/FlashFy-merged.apk
-
-      - name: Decode merged APK
-        run: |
-          set -e
-
-          java -jar apktool.jar d \
-            -f \
-            -r \
-            work/FlashFy-merged.apk \
-            -o work/repack
-
-          test -d work/repack
-
-          echo "APK decoded successfully."
-
-      - name: Prepare baby image
-        run: |
-          set -e
-
-          mkdir -p work/repack/res/drawable-nodpi
-
-          cp bg-fixed.png \
-            work/repack/res/drawable-nodpi/baby_overlay.png
-
-          test -s work/repack/res/drawable-nodpi/baby_overlay.png
-
-          echo "Baby image copied."
-
-      - name: Create BabyOverlay.java
-        run: |
-          set -e
-
-          mkdir -p work/BabyOverlaySrc/com/chowdhuryelab/flashfy
-
-          cat > work/BabyOverlaySrc/com/chowdhuryelab/flashfy/BabyOverlay.java <<'JAVA'
-          package com.chowdhuryelab.flashfy;
-
-          import android.app.Activity;
-          import android.content.Context;
-          import android.graphics.Color;
-          import android.hardware.camera2.CameraAccessException;
-          import android.hardware.camera2.CameraCharacteristics;
-          import android.hardware.camera2.CameraManager;
-          import android.os.Handler;
-          import android.os.Looper;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.view.ViewGroup;
-          import android.widget.FrameLayout;
-          import android.widget.ImageView;
-
-          public final class BabyOverlay {
-
-              private static ImageView imageView;
-              private static CameraManager cameraManager;
-              private static CameraManager.TorchCallback torchCallback;
-              private static boolean installed = false;
-
-              private BabyOverlay() {}
-
-              public static void install(final Activity activity) {
-                  if (activity == null || installed) {
-                      return;
-                  }
-
-                  installed = true;
-
-                  activity.runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          setup(activity);
-                      }
-                  });
-              }
-
-              private static void setup(final Activity activity) {
-                  try {
-                      imageView = new ImageView(activity);
-
-                      imageView.setBackgroundColor(Color.BLACK);
-                      imageView.setImageResource(
-                              activity.getResources().getIdentifier(
-                                      "baby_overlay",
-                                      "drawable",
-                                      activity.getPackageName()
-                              )
-                      );
-
-                      imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                      imageView.setVisibility(View.GONE);
-                      imageView.setClickable(false);
-                      imageView.setFocusable(false);
-
-                      FrameLayout.LayoutParams params =
-                              new FrameLayout.LayoutParams(
-                                      ViewGroup.LayoutParams.MATCH_PARENT,
-                                      ViewGroup.LayoutParams.MATCH_PARENT
-                              );
-
-                      params.gravity = Gravity.CENTER;
-
-                      activity.addContentView(imageView, params);
-
-                      cameraManager =
-                              (CameraManager) activity.getSystemService(
-                                      Context.CAMERA_SERVICE
-                              );
-
-                      if (cameraManager == null) {
-                          return;
-                      }
-
-                      torchCallback = new CameraManager.TorchCallback() {
-
-                          @Override
-                          public void onTorchModeChanged(
-                                  String cameraId,
-                                  boolean enabled
-                          ) {
-                              updateVisibility(activity, enabled);
-                          }
-
-                          @Override
-                          public void onTorchModeUnavailable(
-                                  String cameraId
-                          ) {
-                              updateVisibility(activity, false);
-                          }
-                      };
-
-                      cameraManager.registerTorchCallback(
-                              torchCallback,
-                              new Handler(Looper.getMainLooper())
-                      );
-
-                      updateCurrentTorchState(activity);
-
-                  } catch (Exception ignored) {
-                  }
-              }
-
-              private static void updateCurrentTorchState(
-                      final Activity activity
-              ) {
-                  try {
-                      String[] ids = cameraManager.getCameraIdList();
-
-                      for (String id : ids) {
-                          CameraCharacteristics characteristics =
-                                  cameraManager.getCameraCharacteristics(id);
-
-                          Boolean available =
-                                  characteristics.get(
-                                          CameraCharacteristics.FLASH_INFO_AVAILABLE
-                                  );
-
-                          if (Boolean.TRUE.equals(available)) {
-                              return;
-                          }
-                      }
-
-                  } catch (CameraAccessException ignored) {
-                  }
-              }
-
-              private static void updateVisibility(
-                      final Activity activity,
-                      final boolean visible
-              ) {
-                  if (imageView == null) {
-                      return;
-                  }
-
-                  activity.runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          if (imageView != null) {
-                              imageView.setVisibility(
-                                      visible ? View.VISIBLE : View.GONE
-                              );
-                          }
-                      }
-                  });
-              }
-          }
-          JAVA
-
-      - name: Find MainActivity
-        run: |
-          set -e
-
-          MAIN_SMALI=$(find work/repack/smali* \
-            -type f \
-            -name 'MainActivity.smali' \
-            | head -n 1)
-
-          test -n "$MAIN_SMALI"
-
-          echo "MAIN_SMALI=$MAIN_SMALI" >> "$GITHUB_ENV"
-
-          echo "Found:"
-          echo "$MAIN_SMALI"
-
-      - name: Compile BabyOverlay
-        run: |
-          set -e
-
-          mkdir -p work/baby-classes
-
-          javac \
-            -source 8 \
-            -target 8 \
-            -classpath "$ANDROID_HOME/platforms/android-35/android.jar" \
-            -d work/baby-classes \
-            work/BabyOverlaySrc/com/chowdhuryelab/flashfy/BabyOverlay.java
-
-          test -f work/baby-classes/com/chowdhuryelab/flashfy/BabyOverlay.class
-
-          echo "Java compilation successful."
-
-      - name: Convert BabyOverlay to dex
-        run: |
-          set -e
-
-          mkdir -p work/baby-dex
-
-          "$ANDROID_HOME/build-tools/35.0.0/d8" \
-            --min-api 21 \
-            --output work/baby-dex \
-            work/baby-classes/com/chowdhuryelab/flashfy/BabyOverlay.class
-
-          test -f work/baby-dex/classes.dex
-
-          echo "D8 compilation successful."
-
-      - name: Patch MainActivity
-        run: |
-          set -e
-
-          cp "$MAIN_SMALI" "$MAIN_SMALI.backup"
-
-          python3 - "$MAIN_SMALI" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          if "BabyOverlay;->install" in text:
-              print("MainActivity already patched.")
-              raise SystemExit(0)
-
-          lines = text.splitlines()
-
-          inserted = False
-          out = []
-
-          in_oncreate = False
-          brace_depth = 0
-
-          for line in lines:
-              stripped = line.strip()
-
-              if stripped.startswith(".method") and "onCreate(" in stripped:
-                  in_oncreate = True
-                  brace_depth = 0
-
-              out.append(line)
-
-              if in_oncreate and stripped.startswith("invoke-super"):
-                  out.append(
-                      "    invoke-static {p0}, "
-                      "Lcom/chowdhuryelab/flashfy/BabyOverlay;"
-                      "->install(Landroid/app/Activity;)V"
-                  )
-                  inserted = True
-
-              if in_oncreate and stripped == ".end method":
-                  in_oncreate = False
-
-          if not inserted:
-              raise SystemExit(
-                  "ERROR: Could not find MainActivity.onCreate invoke-super."
-              )
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write("\n".join(out) + "\n")
-
-          print("MainActivity patched successfully.")
+          set -eux
+          export FLUTTERDEC_DATA_DIR=/opt/flutterdec/share/flutterdec
+          export FLUTTERDEC_ADAPTER_STORE="$PWD/analysis/adapter-store"
+          mkdir -p "$FLUTTERDEC_ADAPTER_STORE"
+          /opt/flutterdec/bin/flutterdec info analysis/apk/libapp.so --json | tee analysis/out/info.json || true
+          /opt/flutterdec/bin/flutterdec adapter list --json | tee analysis/out/adapters-before.json || true
+          HASH="$(python3 - <<'PY'
+          import json
+          try: d=json.load(open('analysis/out/info.json'))
+          except Exception: d={}
+          def walk(x):
+              if isinstance(x,dict):
+                  for k,v in x.items():
+                      if 'hash' in k.lower() and isinstance(v,str) and len(v)>=16: return v
+                      r=walk(v)
+                      if r: return r
+              elif isinstance(x,list):
+                  for v in x:
+                      r=walk(v)
+                      if r: return r
+              return ''
+          print(walk(d))
           PY
-
-          grep -n "BabyOverlay;->install" "$MAIN_SMALI"
-
-      - name: Add BabyOverlay dex
+          )"
+          echo "DART_HASH=$HASH" | tee analysis/out/dart-hash.txt
+          if [ -n "$HASH" ]; then /opt/flutterdec/bin/flutterdec adapter install --dart-hash "$HASH" --target-arch arm64 | tee analysis/out/adapter-install.txt || true; fi
+          /opt/flutterdec/bin/flutterdec adapter list --json | tee analysis/out/adapters-after.json || true
+      - name: Run AOT static analysis
         run: |
-          set -e
-
-          TARGET="work/repack/classes2.dex"
-
-          if [ -e "$TARGET" ]; then
-            n=3
-            while [ -e "work/repack/classes${n}.dex" ]; do
-              n=$((n + 1))
-            done
-            TARGET="work/repack/classes${n}.dex"
-          fi
-
-          cp work/baby-dex/classes.dex "$TARGET"
-
-          test -s "$TARGET"
-
-          echo "Added:"
-          echo "$TARGET"
-
-      - name: Verify patch
+          set -eux
+          python3 -m pip install --upgrade pip
+          python3 -m pip install capstone pyelftools
+          git clone --depth 1 https://github.com/BroNils/aotopsy.git analysis/aotopsy
+          python3 -m pip install -e analysis/aotopsy || true
+          mkdir -p analysis/out/aotopsy
+          if command -v aotopsy >/dev/null 2>&1; then aotopsy analysis/apk/libapp.so --output analysis/out/aotopsy || true; else python3 -m aotopsy analysis/apk/libapp.so --output analysis/out/aotopsy || true; fi
+          find analysis/out/aotopsy -maxdepth 4 -type f -print | sort || true
+      - name: Flutterdec decompile with asm and IR
         run: |
-          set -e
-
-          grep -R \
-            "BabyOverlay;->install" \
-            work/repack/smali* \
-            >/dev/null
-
-          test -s work/repack/res/drawable-nodpi/baby_overlay.png
-
-          echo "Patch verification successful."
-
-      - name: Rebuild APK
+          set -eux
+          export FLUTTERDEC_DATA_DIR=/opt/flutterdec/share/flutterdec
+          export FLUTTERDEC_ADAPTER_STORE="$PWD/analysis/adapter-store"
+          mkdir -p analysis/out/flutterdec
+          /opt/flutterdec/bin/flutterdec decompile analysis/apk/libapp.so -o analysis/out/flutterdec --emit-asm --emit-ir --verbose || true
+          find analysis/out/flutterdec -maxdepth 4 -type f -print | sort || true
+      - name: Extract FlashFy painter symbols
         run: |
-          set -e
-
-          java -jar apktool.jar b \
-            work/repack \
-            -o work/FlashFy-unsigned.apk
-
-          test -s work/FlashFy-unsigned.apk
-
-          echo "Unsigned APK created:"
-          ls -lh work/FlashFy-unsigned.apk
-
-      - name: Create signing key
-        run: |
-          set -e
-
-          keytool \
-            -genkeypair \
-            -v \
-            -keystore work/flashfy-release.jks \
-            -alias flashfy \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=FlashFy, OU=FlashFy, O=FlashFy, L=Dhaka, ST=Dhaka, C=BD"
-
-      - name: Sign APK
-        run: |
-          set -e
-
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
-            --ks work/flashfy-release.jks \
-            --ks-key-alias flashfy \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --out work/FlashFy-signed.apk \
-            work/FlashFy-unsigned.apk
-
-          test -s work/FlashFy-signed.apk
-
-      - name: Zipalign APK
-        run: |
-          set -e
-
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
-            -f \
-            4 \
-            work/FlashFy-signed.apk \
-            work/FlashFy-BABY-FINAL.apk
-
-          test -s work/FlashFy-BABY-FINAL.apk
-
-      - name: Verify APK
-        run: |
-          set -e
-
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
-            --verbose \
-            work/FlashFy-BABY-FINAL.apk
-
-          echo "FINAL APK VERIFIED."
-
-          ls -lh work/FlashFy-BABY-FINAL.apk
-
-      - name: Upload final APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlashFy-BABY-FINAL
-          path: work/FlashFy-BABY-FINAL.apk
-          if-no-files-found: error
-          retention-days: 30
+          set -eux
+          strings -t x analysis/apk/libapp.so > analysis/out/strings.txt
+          grep -E '_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|isFlashOn|toggleFlash' analysis/out/strings.txt | tee analysis/out/flashfy-symbols.txt || true
+          readelf -S analysis/apk/libapp.so > analysis/out/elf-sections.txt
+          objdump -d analysis/apk/libapp.so > analysis/out/libapp-aarch64-objdump.txt || true
+      - name: Package diagnostics
+        run: tar -czf flashfy-aot-diagnostics.tar.gz analysis/out
