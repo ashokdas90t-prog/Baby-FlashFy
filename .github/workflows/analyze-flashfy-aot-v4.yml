@@ -1,0 +1,502 @@
+name: Build FlashFy - Baby Image ON
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check input files
+        shell: bash
+        run: |
+          set -e
+          test -f base.apk
+          test -f split_config.arm64_v8a.apk
+          test -f split_config.en.apk
+          test -f split_config.xxhdpi.apk
+          test -f bg-fixed.png
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        shell: bash
+        run: |
+          set -e
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.0"
+
+      - name: Download APKEditor
+        shell: bash
+        run: |
+          set -e
+          curl -L \
+            -o APKEditor.jar \
+            https://github.com/REAndroid/APKEditor/releases/download/V1.4.9/APKEditor-1.4.9.jar
+          test -s APKEditor.jar
+
+      - name: Download Apktool
+        shell: bash
+        run: |
+          set -e
+          curl -L \
+            -o apktool.jar \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.12.0/apktool_2.12.0.jar
+          test -s apktool.jar
+
+      - name: Merge FlashFy split APKs
+        shell: bash
+        run: |
+          set -e
+          mkdir -p work/merge
+
+          java -jar APKEditor.jar m \
+            -i base.apk \
+            -i split_config.arm64_v8a.apk \
+            -i split_config.en.apk \
+            -i split_config.xxhdpi.apk \
+            -o work/FlashFy-merged.apk
+
+          test -s work/FlashFy-merged.apk
+          ls -lh work/FlashFy-merged.apk
+
+      - name: Decode APK
+        shell: bash
+        run: |
+          set -e
+
+          java -jar apktool.jar d \
+            -f \
+            -r \
+            --use-aapt2 \
+            work/FlashFy-merged.apk \
+            -o work/repack
+
+          test -d work/repack
+          find work/repack -maxdepth 3 -type f | head -100
+
+      - name: Add baby image
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work/repack/assets
+          cp bg-fixed.png work/repack/assets/baby_overlay.png
+
+          test -s work/repack/assets/baby_overlay.png
+          file work/repack/assets/baby_overlay.png
+
+      - name: Create BabyOverlay.java
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work/java
+
+          cat > work/java/BabyOverlay.java <<'JAVA'
+          package com.chowdhuryelab.flashfy;
+
+          import android.app.Activity;
+          import android.content.Context;
+          import android.graphics.Color;
+          import android.graphics.drawable.Drawable;
+          import android.hardware.camera2.CameraAccessException;
+          import android.hardware.camera2.CameraManager;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.ImageView;
+
+          public final class BabyOverlay {
+
+              private static ImageView imageView;
+              private static boolean installed = false;
+              private static boolean torchOn = false;
+              private static CameraManager cameraManager;
+              private static CameraManager.TorchCallback torchCallback;
+
+              private BabyOverlay() {}
+
+              public static void install(final Activity activity) {
+                  if (activity == null) return;
+
+                  new Handler(Looper.getMainLooper()).postDelayed(
+                      new Runnable() {
+                          @Override
+                          public void run() {
+                              try {
+                                  createOverlay(activity);
+                                  watchTorch(activity);
+                              } catch (Throwable ignored) {
+                              }
+                          }
+                      },
+                      1200
+                  );
+              }
+
+              private static void createOverlay(Activity activity) {
+                  if (installed && imageView != null) return;
+
+                  imageView = new ImageView(activity);
+                  imageView.setBackgroundColor(Color.TRANSPARENT);
+                  imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                  imageView.setImageResource(
+                      activity.getResources().getIdentifier(
+                          "baby_overlay",
+                          "drawable",
+                          activity.getPackageName()
+                      )
+                  );
+
+                  int imageId = activity.getResources().getIdentifier(
+                      "baby_overlay",
+                      "drawable",
+                      activity.getPackageName()
+                  );
+
+                  if (imageId != 0) {
+                      imageView.setImageResource(imageId);
+                  } else {
+                      try {
+                          int assetId = activity.getResources().getIdentifier(
+                              "baby_overlay",
+                              "drawable",
+                              activity.getPackageName()
+                          );
+                          if (assetId != 0) {
+                              imageView.setImageResource(assetId);
+                          }
+                      } catch (Throwable ignored) {
+                      }
+                  }
+
+                  WindowManager.LayoutParams params =
+                      new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                              | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                              | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          android.graphics.PixelFormat.TRANSLUCENT
+                      );
+
+                  params.gravity = Gravity.CENTER;
+
+                  try {
+                      activity.addContentView(imageView, params);
+                      installed = true;
+                      updateVisibility();
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private static void watchTorch(Activity activity) {
+                  if (cameraManager != null) return;
+
+                  try {
+                      cameraManager =
+                          (CameraManager) activity.getSystemService(
+                              Context.CAMERA_SERVICE
+                          );
+
+                      if (cameraManager == null) return;
+
+                      torchCallback = new CameraManager.TorchCallback() {
+                          @Override
+                          public void onTorchModeChanged(
+                              String cameraId,
+                              boolean enabled
+                          ) {
+                              torchOn = enabled;
+                              updateVisibility();
+                          }
+
+                          @Override
+                          public void onTorchModeUnavailable(String cameraId) {
+                          }
+                      };
+
+                      cameraManager.registerTorchCallback(
+                          torchCallback,
+                          new Handler(Looper.getMainLooper())
+                      );
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              private static void updateVisibility() {
+                  if (imageView == null) return;
+
+                  new Handler(Looper.getMainLooper()).post(
+                      new Runnable() {
+                          @Override
+                          public void run() {
+                              if (imageView != null) {
+                                  imageView.setVisibility(
+                                      torchOn ? View.VISIBLE : View.GONE
+                                  );
+                              }
+                          }
+                      }
+                  );
+              }
+          }
+          JAVA
+
+      - name: Prepare baby drawable
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work/repack/res/drawable-nodpi
+          cp bg-fixed.png work/repack/res/drawable-nodpi/baby_overlay.png
+
+          test -s work/repack/res/drawable-nodpi/baby_overlay.png
+
+      - name: Find MainActivity smali
+        shell: bash
+        run: |
+          set -e
+
+          find work/repack/smali* \
+            -type f \
+            -name 'MainActivity.smali' \
+            -print \
+            -exec cp {} work/MainActivity.smali \;
+
+          test -s work/MainActivity.smali
+
+          echo "MainActivity:"
+          cat work/MainActivity.smali
+
+      - name: Compile BabyOverlay
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p work/classes
+
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+
+          javac \
+            -source 8 \
+            -target 8 \
+            -classpath "$ANDROID_JAR" \
+            -d work/classes \
+            work/java/BabyOverlay.java
+
+          "$ANDROID_HOME/build-tools/35.0.0/d8" \
+            --min-api 23 \
+            --lib "$ANDROID_JAR" \
+            --output work/dex \
+            $(find work/classes -name '*.class')
+
+          test -s work/dex/classes.dex
+
+      - name: Patch MainActivity
+        shell: bash
+        run: |
+          set -e
+
+          MAIN=""
+
+          MAIN=$(find work/repack/smali* \
+            -type f \
+            -name 'MainActivity.smali' \
+            | head -1)
+
+          test -n "$MAIN"
+
+          cp "$MAIN" work/MainActivity.before.smali
+
+          if grep -q "BabyOverlay;->install" "$MAIN"; then
+            echo "Already patched"
+            exit 0
+          fi
+
+          python3 - "$MAIN" <<'PY'
+          import sys
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              s = f.read()
+
+          invoke = (
+              "    invoke-static {p0}, "
+              "Lcom/chowdhuryelab/flashfy/BabyOverlay;->install("
+              "Landroid/app/Activity;)V\n"
+          )
+
+          if "Landroid/app/Activity;->onCreate" in s:
+              marker = ".method protected onCreate(Landroid/os/Bundle;)V"
+              pos = s.find(marker)
+
+              if pos >= 0:
+                  end = s.find(".end method", pos)
+
+                  if end >= 0:
+                      block = s[pos:end]
+
+                      lines = block.splitlines(True)
+
+                      insert_at = None
+
+                      for i, line in enumerate(lines):
+                          if "invoke-super" in line and "onCreate" in line:
+                              insert_at = i + 1
+                              break
+
+                      if insert_at is None:
+                          for i, line in enumerate(lines):
+                              if line.strip() == ".locals 0":
+                                  insert_at = i + 1
+                                  break
+
+                      if insert_at is not None:
+                          lines.insert(insert_at, invoke)
+                          block = "".join(lines)
+                          s = s[:pos] + block + s[end:]
+
+          elif ".method public onCreate(Landroid/os/Bundle;)V" in s:
+              marker = ".method public onCreate(Landroid/os/Bundle;)V"
+              pos = s.find(marker)
+              end = s.find(".end method", pos)
+
+              if pos >= 0 and end >= 0:
+                  block = s[pos:end]
+                  lines = block.splitlines(True)
+
+                  insert_at = None
+
+                  for i, line in enumerate(lines):
+                      if "invoke-super" in line and "onCreate" in line:
+                          insert_at = i + 1
+                          break
+
+                  if insert_at is not None:
+                      lines.insert(insert_at, invoke)
+                      block = "".join(lines)
+                      s = s[:pos] + block + s[end:]
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(s)
+          PY
+
+          grep -n "BabyOverlay" "$MAIN" || true
+
+      - name: Add BabyOverlay dex
+        shell: bash
+        run: |
+          set -e
+
+          cp work/dex/classes.dex work/repack/classes2.dex
+
+          test -s work/repack/classes2.dex
+
+      - name: Verify patched files
+        shell: bash
+        run: |
+          set -e
+
+          test -s work/repack/res/drawable-nodpi/baby_overlay.png
+          test -s work/repack/classes2.dex
+
+          find work/repack/smali* \
+            -type f \
+            -name 'MainActivity.smali' \
+            -exec grep -Hn "BabyOverlay" {} \; || true
+
+      - name: Rebuild APK
+        shell: bash
+        run: |
+          set -e
+
+          java -jar apktool.jar b \
+            --use-aapt2 \
+            work/repack \
+            -o work/FlashFy-unsigned.apk
+
+          test -s work/FlashFy-unsigned.apk
+          ls -lh work/FlashFy-unsigned.apk
+
+      - name: Create signing key
+        shell: bash
+        run: |
+          set -e
+
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore work/flashfy.keystore \
+            -alias flashfy \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=FlashFy, OU=FlashFy, O=FlashFy, L=Dhaka, S=Dhaka, C=BD"
+
+          test -s work/flashfy.keystore
+
+      - name: Sign APK
+        shell: bash
+        run: |
+          set -e
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks work/flashfy.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias flashfy \
+            --out work/FlashFy-signed.apk \
+            work/FlashFy-unsigned.apk
+
+          test -s work/FlashFy-signed.apk
+
+      - name: Zipalign APK
+        shell: bash
+        run: |
+          set -e
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
+            -f \
+            4 \
+            work/FlashFy-signed.apk \
+            work/FlashFy-BABY-FINAL.apk
+
+          test -s work/FlashFy-BABY-FINAL.apk
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            work/FlashFy-BABY-FINAL.apk
+
+          ls -lh work/FlashFy-BABY-FINAL.apk
+
+      - name: Upload final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-BABY-FINAL
+          path: work/FlashFy-BABY-FINAL.apk
+          if-no-files-found: error
+          retention-days: 30
