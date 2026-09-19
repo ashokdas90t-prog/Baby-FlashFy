@@ -162,7 +162,7 @@ jobs:
           echo "Source APK:"
           cat work/libapp-source.txt
 
-      # ============================================================
+            # ============================================================
       # 5. Download Flutterdec alpha.4
       # ============================================================
       - name: Download Flutterdec alpha.4
@@ -177,7 +177,8 @@ jobs:
           echo "Downloading Flutterdec:"
           echo "$URL"
 
-          rm -f /tmp/flutterdec.tar.gz
+          rm -rf /opt/flutterdec
+          mkdir -p /opt/flutterdec
 
           curl \
             -L \
@@ -191,28 +192,65 @@ jobs:
           echo "Downloaded:"
           ls -lh /tmp/flutterdec.tar.gz
 
-          mkdir -p /opt/flutterdec
+          echo
+          echo "Archive contents:"
+          tar -tzf /tmp/flutterdec.tar.gz \
+            | sed -n '1,80p'
+
+          echo
+          echo "Extracting Flutterdec..."
 
           tar \
             -xzf /tmp/flutterdec.tar.gz \
-            -C /opt/flutterdec \
-            --strip-components=1
+            -C /opt/flutterdec
 
           echo
-          echo "Flutterdec files:"
+          echo "Extracted files:"
           find /opt/flutterdec \
-            -maxdepth 4 \
+            -maxdepth 6 \
             -type f \
             | sort \
             | sed -n '1,300p'
 
-          test -x /opt/flutterdec/bin/flutterdec
+          echo
+          echo "Locating flutterdec binary..."
+
+          FLUTTERDEC_BIN="$(
+            find /opt/flutterdec \
+              -type f \
+              -path '*/bin/flutterdec' \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$FLUTTERDEC_BIN" ]; then
+            echo "ERROR: flutterdec binary not found."
+            exit 1
+          fi
+
+          FLUTTERDEC_PREFIX="$(dirname "$(dirname "$FLUTTERDEC_BIN")")"
+
+          echo
+          echo "Flutterdec binary:"
+          echo "$FLUTTERDEC_BIN"
+
+          echo
+          echo "Flutterdec prefix:"
+          echo "$FLUTTERDEC_PREFIX"
+
+          test -f "$FLUTTERDEC_PREFIX/bin/flutterdec"
+          test -f "$FLUTTERDEC_PREFIX/share/flutterdec/adapters/registry.json"
+
+          chmod +x "$FLUTTERDEC_PREFIX/bin/flutterdec"
 
           echo
           echo "Flutterdec version:"
-          /opt/flutterdec/bin/flutterdec --version || true
+          "$FLUTTERDEC_PREFIX/bin/flutterdec" --version || true
 
-          echo "FLUTTERDEC=/opt/flutterdec/bin/flutterdec" \
+          echo "FLUTTERDEC=$FLUTTERDEC_PREFIX/bin/flutterdec" \
+            >> "$GITHUB_ENV"
+
+          echo "FLUTTERDEC_DATA_DIR=$FLUTTERDEC_PREFIX/share/flutterdec" \
             >> "$GITHUB_ENV"
 
       # ============================================================
