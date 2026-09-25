@@ -520,4 +520,544 @@ jobs:
 
       # ============================================================
       # 10. INSTALL MATCHING FLUTTERDEC ADAPTER
-      # =================================================
+      # ============================================================
+      - name: Install matching Flutterdec adapter
+        shell: bash
+        run: |
+          set +e
+
+          echo
+          echo "============================================================"
+          echo "INSTALLING MATCHING ADAPTER"
+          echo "============================================================"
+
+          echo "Snapshot:"
+          echo "$SNAPSHOT_HASH"
+
+          rm -f \
+            work/adapter/install.json \
+            work/adapter/install.txt
+
+          "$FLUTTERDEC" \
+            adapter install \
+            --dart-hash "$SNAPSHOT_HASH" \
+            --json \
+            > work/adapter/install.json \
+            2> work/adapter/install.txt
+
+          STATUS=$?
+
+          echo
+          echo "Adapter install exit code:"
+          echo "$STATUS"
+
+          echo
+          echo "Adapter install stdout:"
+          cat work/adapter/install.json \
+            || true
+
+          echo
+          echo "Adapter install stderr:"
+          cat work/adapter/install.txt \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "ADAPTER LIST AFTER INSTALL"
+          echo "============================================================"
+
+          "$FLUTTERDEC" \
+            adapter list \
+            --json \
+            > work/adapter/list-after.json \
+            2>&1
+
+          LIST_STATUS=$?
+
+          echo
+          echo "Adapter list exit code:"
+          echo "$LIST_STATUS"
+
+          cat work/adapter/list-after.json \
+            || true
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo
+            echo "ERROR: Adapter installation failed."
+            exit "$STATUS"
+          fi
+
+      # ============================================================
+      # 11. VERIFY ADAPTER
+      # ============================================================
+      - name: Verify adapter with Flutterdec info
+        shell: bash
+        run: |
+          set +e
+
+          echo
+          echo "============================================================"
+          echo "INFO AFTER ADAPTER INSTALL"
+          echo "============================================================"
+
+          "$FLUTTERDEC" \
+            info \
+            work/libapp.so \
+            --json \
+            > work/info/info-after-adapter.json \
+            2> work/info/info-after-adapter.stderr
+
+          STATUS=$?
+
+          echo
+          echo "Info exit code:"
+          echo "$STATUS"
+
+          echo
+          echo "INFO:"
+          cat work/info/info-after-adapter.json \
+            || true
+
+          echo
+          echo "STDERR:"
+          cat work/info/info-after-adapter.stderr \
+            || true
+
+          exit 0
+
+      # ============================================================
+      # 12. DECOMPILE FLUTTER AOT
+      # ============================================================
+      - name: Decompile Flutter AOT
+        shell: bash
+        run: |
+          set +e
+
+          rm -rf work/flutterdec-out
+
+          mkdir -p work/flutterdec-out
+
+          echo
+          echo "============================================================"
+          echo "DECOMPILING LIBAPP.SO"
+          echo "============================================================"
+
+          "$FLUTTERDEC" \
+            decompile \
+            work/libapp.so \
+            -o work/flutterdec-out \
+            --emit-asm \
+            --emit-ir \
+            --emit-ghidra-script \
+            --emit-ida-script \
+            --function-scope all \
+            > work/flutterdec-out/decompile.log \
+            2>&1
+
+          STATUS=$?
+
+          echo
+          echo "Decompile exit code:"
+          echo "$STATUS"
+
+          echo
+          echo "Decompile log:"
+          cat work/flutterdec-out/decompile.log \
+            || true
+
+          echo
+          echo "Generated files:"
+
+          find work/flutterdec-out \
+            -type f \
+            -printf "%p %s bytes\n" \
+            | sort
+
+          echo "$STATUS" \
+            > work/flutterdec-out/exit-code.txt
+
+          # Keep artifacts even if quality gate returns non-zero.
+          exit 0
+
+      # ============================================================
+      # 13. SEARCH PAINTER FUNCTIONS
+      # ============================================================
+      - name: Inspect decompiler output
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/search
+
+          PATTERN="_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn|TorchService|flashfy_screen.dart|flashfy_controller.dart|torch_service.dart"
+
+          echo "============================================================" \
+            > work/search/painter-search.txt
+
+          echo "FLUTTERDEC OUTPUT" \
+            >> work/search/painter-search.txt
+
+          echo "============================================================" \
+            >> work/search/painter-search.txt
+
+          grep -RniE \
+            "$PATTERN" \
+            work/flutterdec-out \
+            >> work/search/painter-search.txt \
+            2>&1 \
+            || true
+
+          echo \
+            >> work/search/painter-search.txt
+
+          echo "============================================================" \
+            >> work/search/painter-search.txt
+
+          echo "RAW STRINGS" \
+            >> work/search/painter-search.txt
+
+          echo "============================================================" \
+            >> work/search/painter-search.txt
+
+          strings \
+            -a \
+            -t x \
+            work/libapp.so \
+            | grep -Ei \
+              "$PATTERN" \
+            >> work/search/painter-search.txt \
+            2>&1 \
+            || true
+
+          echo
+          echo "Painter search:"
+          cat work/search/painter-search.txt
+
+      # ============================================================
+      # 14. COLLECT RECOVERED PSEUDOCODE
+      # ============================================================
+      - name: Collect recovered pseudocode
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/recovered
+
+          find work/flutterdec-out \
+            -type f \
+            \( \
+              -name "*.dartpseudo" \
+              -o \
+              -name "*.dart" \
+              -o \
+              -name "*.txt" \
+            \) \
+            -print \
+            | sort \
+            > work/recovered/files.txt
+
+          echo
+          echo "Recovered source-like files:"
+          cat work/recovered/files.txt
+
+          echo
+          echo "Searching recovered pseudocode..."
+
+          while IFS= read -r FILE; do
+
+            [ -z "$FILE" ] && continue
+
+            grep -niE \
+              "_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn" \
+              "$FILE" \
+              2>/dev/null \
+              && echo \
+              || true
+
+          done < work/recovered/files.txt \
+            > work/recovered/matching-functions.txt
+
+          echo
+          echo "Matching recovered functions:"
+          cat work/recovered/matching-functions.txt \
+            || true
+
+      # ============================================================
+      # 15. INSPECT ELF
+      # ============================================================
+      - name: Inspect ELF
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/elf
+
+          file \
+            work/libapp.so \
+            > work/elf/file.txt \
+            2>&1
+
+          readelf \
+            -h \
+            work/libapp.so \
+            > work/elf/header.txt \
+            2>&1
+
+          readelf \
+            -S \
+            work/libapp.so \
+            > work/elf/sections.txt \
+            2>&1
+
+          readelf \
+            -l \
+            work/libapp.so \
+            > work/elf/program-headers.txt \
+            2>&1
+
+          echo "=== FILE ==="
+          cat work/elf/file.txt || true
+
+          echo
+          echo "=== HEADER ==="
+          cat work/elf/header.txt || true
+
+          echo
+          echo "=== SECTIONS ==="
+          cat work/elf/sections.txt || true
+
+      # ============================================================
+      # 16. GENERATE ARM64 DISASSEMBLY
+      # ============================================================
+      - name: Generate ARM64 disassembly
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/disassembly
+
+          objdump \
+            -d \
+            -M no-aliases \
+            work/libapp.so \
+            > work/disassembly/libapp-objdump.txt \
+            2>&1
+
+          STATUS=$?
+
+          echo "objdump status:"
+          echo "$STATUS"
+
+          wc -l \
+            work/disassembly/libapp-objdump.txt \
+            || true
+
+      # ============================================================
+      # 17. DEEP SEARCH
+      # ============================================================
+      - name: Deep search recovered output
+        shell: bash
+        run: |
+          set +e
+
+          PATTERN="_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn|TorchService"
+
+          grep -RniE \
+            "$PATTERN" \
+            work \
+            > work/search/all-matches.txt \
+            2>&1 \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "ALL MATCHES"
+          echo "============================================================"
+
+          cat work/search/all-matches.txt \
+            || true
+
+      # ============================================================
+      # 18. EXTRACT FLUTTER ASSETS
+      # ============================================================
+      - name: Extract Flutter assets
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/assets
+
+          while IFS= read -r APK; do
+
+            [ -z "$APK" ] && continue
+
+            NAME="$(basename "$APK" .apk)"
+
+            mkdir -p \
+              "work/assets/$NAME"
+
+            unzip \
+              -q \
+              -o \
+              "$APK" \
+              "assets/flutter_assets/assets/*" \
+              -d \
+              "work/assets/$NAME" \
+              2>/dev/null \
+              || true
+
+          done < work/apk-list.txt
+
+          find work/assets \
+            -type f \
+            -printf "%p %s bytes\n" \
+            | sort \
+            > work/assets/list.txt
+
+          cat work/assets/list.txt
+
+      # ============================================================
+      # 19. FINAL SUMMARY
+      # ============================================================
+      - name: Create final summary
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/final
+
+          {
+            echo "============================================================"
+            echo "FLASHFY AOT ANALYSIS"
+            echo "============================================================"
+            echo
+
+            echo "Snapshot hash:"
+            cat work/snapshot-hash.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "libapp SHA256:"
+            cat work/libapp.sha256 \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "REGISTRY MATCH"
+            echo "============================================================"
+
+            cat work/adapter/registry-match.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER INSTALL"
+            echo "============================================================"
+
+            cat work/adapter/install.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            cat work/adapter/install.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER LIST AFTER"
+            echo "============================================================"
+
+            cat work/adapter/list-after.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "INFO AFTER ADAPTER"
+            echo "============================================================"
+
+            cat work/info/info-after-adapter.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "DECOMPILE LOG"
+            echo "============================================================"
+
+            cat work/flutterdec-out/decompile.log \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "RECOVERED PAINTER FUNCTIONS"
+            echo "============================================================"
+
+            cat work/recovered/matching-functions.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "SEARCH RESULTS"
+            echo "============================================================"
+
+            cat work/search/all-matches.txt \
+              2>/dev/null \
+              || true
+
+          } > work/final/FINAL-SUMMARY.txt
+
+          cat work/final/FINAL-SUMMARY.txt
+
+      # ============================================================
+      # 20. UPLOAD COMPLETE ANALYSIS
+      # ============================================================
+      - name: Upload complete AOT analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-Raw-Analysis
+          path: work
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ============================================================
+      # 21. UPLOAD DIAGNOSTICS
+      # ============================================================
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-Diagnostics
+          path: |
+            work/final/FINAL-SUMMARY.txt
+            work/search/painter-search.txt
+            work/search/all-matches.txt
+            work/recovered/matching-functions.txt
+            work/adapter/registry-match.txt
+            work/adapter/install.json
+            work/adapter/install.txt
+            work/adapter/list-before.json
+            work/adapter/list-after.json
+            work/info/info.json
+            work/info/info.stderr
+            work/info/info-after-adapter.json
+            work/info/info-after-adapter.stderr
+            work/flutterdec-out/report.json
+            work/flutterdec-out/quality.json
+            work/flutterdec-out/decompile.log
+          if-no-files-found: warn
+          retention-days: 14
