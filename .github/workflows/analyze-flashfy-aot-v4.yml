@@ -31,7 +31,7 @@ jobs:
           find . -maxdepth 5 -type f | sort | head -1000
 
       # ============================================================
-      # 3. FIND APK
+      # 3. LOCATE APK FILES
       # ============================================================
       - name: Locate APK files
         shell: bash
@@ -131,9 +131,16 @@ jobs:
 
           URL="https://github.com/caverav/flutterdec/releases/download/${VERSION}/flutterdec-v0.1.0-alpha.4-Linux-X64.tar.gz"
 
+          rm -rf work/flutterdec
+
           mkdir -p work/flutterdec
 
-          echo "Downloading:"
+          echo
+          echo "============================================================"
+          echo "DOWNLOADING FLUTTERDEC"
+          echo "============================================================"
+
+          echo "URL:"
           echo "$URL"
 
           curl \
@@ -144,58 +151,162 @@ jobs:
             -o work/flutterdec/flutterdec.tar.gz
 
           echo
-          echo "Archive:"
-          tar -tzf work/flutterdec/flutterdec.tar.gz
+          echo "============================================================"
+          echo "ARCHIVE CONTENTS"
+          echo "============================================================"
+
+          tar \
+            -tzf \
+            work/flutterdec/flutterdec.tar.gz
 
           rm -rf work/flutterdec/extracted
 
           mkdir -p work/flutterdec/extracted
 
           tar \
-            -xzf work/flutterdec/flutterdec.tar.gz \
-            -C work/flutterdec/extracted
+            -xzf \
+            work/flutterdec/flutterdec.tar.gz \
+            -C \
+            work/flutterdec/extracted
 
           echo
-          echo "Extracted:"
+          echo "============================================================"
+          echo "EXTRACTED FILES"
+          echo "============================================================"
+
           find work/flutterdec/extracted \
             -type f \
-            -printf "%p\n"
+            -printf "%p\n" \
+            | sort
 
-          # The actual alpha.4 archive contains a flat executable.
+          # --------------------------------------------------------
+          # Find executable.
+          # Official release layout:
+          #
+          #   bin/flutterdec
+          #   share/flutterdec/
+          #
+          # --------------------------------------------------------
+
           BIN="$(
             find work/flutterdec/extracted \
               -type f \
-              -name flutterdec \
+              -path "*/bin/flutterdec" \
               | head -n 1
           )"
 
+          # Fallback for a flat distribution.
           if [ -z "$BIN" ]; then
+            BIN="$(
+              find work/flutterdec/extracted \
+                -type f \
+                -name "flutterdec" \
+                | head -n 1
+            )"
+          fi
+
+          if [ -z "$BIN" ]; then
+            echo
             echo "ERROR: Flutterdec executable not found."
             exit 1
           fi
 
-          mkdir -p /opt/flutterdec
+          echo
+          echo "Flutterdec executable:"
+          echo "$BIN"
 
-          cp "$BIN" /opt/flutterdec/flutterdec
+          # --------------------------------------------------------
+          # Find compatibility registry.
+          # This proves that the packaged Flutterdec data exists.
+          # --------------------------------------------------------
 
-          chmod +x /opt/flutterdec/flutterdec
+          REGISTRY="$(
+            find work/flutterdec/extracted \
+              -type f \
+              -path "*/share/flutterdec/adapters/registry.json" \
+              | head -n 1
+          )"
 
-          echo "FLUTTERDEC=/opt/flutterdec/flutterdec" \
+          # Fallback for flat unpacked distribution.
+          if [ -z "$REGISTRY" ]; then
+            REGISTRY="$(
+              find work/flutterdec/extracted \
+                -type f \
+                -path "*/adapters/registry.json" \
+                | head -n 1
+            )"
+          fi
+
+          if [ -z "$REGISTRY" ]; then
+            echo
+            echo "ERROR: Flutterdec compatibility registry not found."
+            echo
+            echo "The release archive must contain:"
+            echo "  share/flutterdec/adapters/registry.json"
+            echo
+            exit 1
+          fi
+
+          echo
+          echo "Compatibility registry:"
+          echo "$REGISTRY"
+
+          # --------------------------------------------------------
+          # Derive the Flutterdec data directory from registry path.
+          #
+          # /prefix/share/flutterdec/adapters/registry.json
+          #                         ^^^^^^^^^^^^^^^
+          # DATA_DIR = /prefix/share/flutterdec
+          # --------------------------------------------------------
+
+          DATA_DIR="$(
+            dirname \
+              "$(dirname "$REGISTRY")"
+          )"
+
+          echo
+          echo "Flutterdec data directory:"
+          echo "$DATA_DIR"
+
+          echo
+          echo "Registry check:"
+          test -f \
+            "$DATA_DIR/adapters/registry.json"
+
+          echo "OK"
+
+          # --------------------------------------------------------
+          # Use the executable and data directly from the extracted
+          # release prefix. Do not separate the binary from share/.
+          # --------------------------------------------------------
+
+          echo "FLUTTERDEC=$BIN" \
+            >> "$GITHUB_ENV"
+
+          echo "FLUTTERDEC_DATA_DIR=$DATA_DIR" \
             >> "$GITHUB_ENV"
 
           echo
-          echo "Flutterdec:"
-          /opt/flutterdec/flutterdec --version
+          echo "============================================================"
+          echo "FLUTTERDEC VERSION"
+          echo "============================================================"
+
+          "$BIN" \
+            --version
 
       # ============================================================
-      # 6. PREPARE FLUTTERDEC STORE
+      # 6. PREPARE FLUTTERDEC ADAPTER STORE
       # ============================================================
       - name: Prepare Flutterdec adapter store
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$GITHUB_WORKSPACE/work/flutterdec-adapters"
+          mkdir -p \
+            "$GITHUB_WORKSPACE/work/flutterdec-adapters"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/work/xdg-data"
 
           echo "FLUTTERDEC_ADAPTER_STORE=$GITHUB_WORKSPACE/work/flutterdec-adapters" \
             >> "$GITHUB_ENV"
@@ -203,7 +314,9 @@ jobs:
           echo "XDG_DATA_HOME=$GITHUB_WORKSPACE/work/xdg-data" \
             >> "$GITHUB_ENV"
 
-          mkdir -p "$GITHUB_WORKSPACE/work/xdg-data"
+          echo
+          echo "Adapter store:"
+          echo "$GITHUB_WORKSPACE/work/flutterdec-adapters"
 
       # ============================================================
       # 7. FLUTTERDEC INFO
@@ -215,6 +328,11 @@ jobs:
 
           mkdir -p work/info
 
+          echo
+          echo "============================================================"
+          echo "FLUTTERDEC INFO"
+          echo "============================================================"
+
           "$FLUTTERDEC" \
             info \
             work/libapp.so \
@@ -224,6 +342,7 @@ jobs:
 
           STATUS=$?
 
+          echo
           echo "Flutterdec info exit code:"
           echo "$STATUS"
 
@@ -235,11 +354,10 @@ jobs:
           echo "INFO STDERR:"
           cat work/info/info.stderr || true
 
-          # info may return non-zero when an adapter is unavailable.
           exit 0
 
       # ============================================================
-      # 8. EXTRACT SNAPSHOT HASH
+      # 8. DETECT DART SNAPSHOT HASH
       # ============================================================
       - name: Detect Dart snapshot hash
         shell: bash
@@ -264,7 +382,11 @@ jobs:
                       errors="replace"
                   )
               )
-          except Exception:
+          except Exception as exc:
+              print(
+                  f"Could not parse info.json: {exc}",
+                  flush=True
+              )
               raise SystemExit(0)
 
           value = data.get("snapshot_hash")
@@ -287,6 +409,10 @@ jobs:
             echo "Flutterdec info:"
             cat work/info/info.json || true
 
+            echo
+            echo "Flutterdec stderr:"
+            cat work/info/info.stderr || true
+
             exit 1
           fi
 
@@ -294,6 +420,7 @@ jobs:
           echo "============================================================"
           echo "DART SNAPSHOT HASH"
           echo "============================================================"
+
           echo "$HASH"
 
           echo "$HASH" \
@@ -303,12 +430,79 @@ jobs:
             >> "$GITHUB_ENV"
 
       # ============================================================
-      # 9. INSTALL MATCHING ADAPTER
+      # 9. CHECK ADAPTER REGISTRY BEFORE INSTALL
+      # ============================================================
+      - name: Check matching adapter registry
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/adapter
+
+          echo
+          echo "============================================================"
+          echo "ADAPTER REGISTRY CHECK"
+          echo "============================================================"
+
+          echo "Snapshot:"
+          echo "$SNAPSHOT_HASH"
+
+          echo
+          echo "Flutterdec data directory:"
+          echo "$FLUTTERDEC_DATA_DIR"
+
+          echo
+          echo "Registry:"
+          ls -lh \
+            "$FLUTTERDEC_DATA_DIR/adapters/registry.json"
+
+          echo
+          echo "Searching registry for snapshot hash..."
+
+          grep -ni \
+            "$SNAPSHOT_HASH" \
+            "$FLUTTERDEC_DATA_DIR/adapters/registry.json" \
+            > work/adapter/registry-match.txt \
+            2>&1
+
+          STATUS=$?
+
+          echo
+          echo "Registry search exit code:"
+          echo "$STATUS"
+
+          cat work/adapter/registry-match.txt \
+            || true
+
+          echo
+          echo "Adapter list BEFORE install:"
+
+          "$FLUTTERDEC" \
+            adapter list \
+            --json \
+            > work/adapter/list-before.json \
+            2>&1
+
+          LIST_STATUS=$?
+
+          echo
+          echo "Adapter list exit code:"
+          echo "$LIST_STATUS"
+
+          cat work/adapter/list-before.json \
+            || true
+
+          # Do not stop here.
+          # The install step below will provide the authoritative error.
+          exit 0
+
+      # ============================================================
+      # 10. INSTALL MATCHING FLUTTERDEC ADAPTER
       # ============================================================
       - name: Install matching Flutterdec adapter
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
 
           echo
           echo "============================================================"
@@ -318,15 +512,15 @@ jobs:
           echo "Snapshot:"
           echo "$SNAPSHOT_HASH"
 
-          rm -rf work/adapter
-
-          mkdir -p work/adapter
+          rm -rf work/adapter/install.json
+          rm -f work/adapter/install.txt
 
           "$FLUTTERDEC" \
             adapter install \
             --dart-hash "$SNAPSHOT_HASH" \
-            > work/adapter/install.txt \
-            2>&1
+            --json \
+            > work/adapter/install.json \
+            2> work/adapter/install.txt
 
           STATUS=$?
 
@@ -334,33 +528,60 @@ jobs:
           echo "Adapter install exit code:"
           echo "$STATUS"
 
-          cat work/adapter/install.txt
+          echo
+          echo "Adapter install stdout:"
+          cat work/adapter/install.json \
+            || true
 
-          if [ "$STATUS" -ne 0 ]; then
-            echo
-            echo "ERROR: Adapter installation failed."
-            exit "$STATUS"
-          fi
+          echo
+          echo "Adapter install stderr:"
+          cat work/adapter/install.txt \
+            || true
 
           echo
           echo "============================================================"
-          echo "ADAPTER LIST"
+          echo "ADAPTER LIST AFTER INSTALL"
           echo "============================================================"
 
           "$FLUTTERDEC" \
             adapter list \
-            > work/adapter/list.txt \
+            --json \
+            > work/adapter/list-after.json \
             2>&1
 
-          cat work/adapter/list.txt
+          LIST_STATUS=$?
+
+          echo
+          echo "Adapter list exit code:"
+          echo "$LIST_STATUS"
+
+          cat work/adapter/list-after.json \
+            || true
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo
+            echo "ERROR: Adapter installation failed."
+            echo
+            echo "The exact Flutterdec error has been saved to:"
+            echo "work/adapter/install.txt"
+            echo "work/adapter/install.json"
+            echo "work/adapter/list-after.json"
+
+            exit "$STATUS"
+          fi
 
       # ============================================================
-      # 10. VERIFY INFO AFTER ADAPTER
+      # 11. VERIFY ADAPTER WITH FLUTTERDEC INFO
       # ============================================================
       - name: Verify adapter with Flutterdec info
         shell: bash
         run: |
           set +e
+
+          echo
+          echo "============================================================"
+          echo "INFO AFTER ADAPTER"
+          echo "============================================================"
 
           "$FLUTTERDEC" \
             info \
@@ -371,21 +592,24 @@ jobs:
 
           STATUS=$?
 
+          echo
           echo "Info exit code:"
           echo "$STATUS"
 
           echo
           echo "INFO AFTER ADAPTER:"
-          cat work/info/info-after-adapter.json || true
+          cat work/info/info-after-adapter.json \
+            || true
 
           echo
           echo "STDERR:"
-          cat work/info/info-after-adapter.stderr || true
+          cat work/info/info-after-adapter.stderr \
+            || true
 
           exit 0
 
       # ============================================================
-      # 11. DECOMPILE AOT
+      # 12. DECOMPILE FLUTTER AOT
       # ============================================================
       - name: Decompile Flutter AOT
         shell: bash
@@ -435,12 +659,12 @@ jobs:
           echo "$STATUS" \
             > work/flutterdec-out/exit-code.txt
 
-          # Flutterdec can generate useful output even when its
-          # strict quality gate returns non-zero.
+          # Flutterdec may write useful artifacts even when
+          # its final quality gate returns non-zero.
           exit 0
 
       # ============================================================
-      # 12. FIND IMPORTANT FILES
+      # 13. INSPECT DECOMPILER OUTPUT
       # ============================================================
       - name: Inspect decompiler output
         shell: bash
@@ -489,10 +713,12 @@ jobs:
             2>&1 \
             || true
 
+          echo
+          echo "Painter search:"
           cat work/search/painter-search.txt
 
       # ============================================================
-      # 13. EXTRACT PSEUDOCODE
+      # 14. COLLECT RECOVERED PSEUDOCODE
       # ============================================================
       - name: Collect recovered pseudocode
         shell: bash
@@ -503,13 +729,13 @@ jobs:
 
           find work/flutterdec-out \
             -type f \
-            \( \
+            \
               -name "*.dartpseudo" \
               -o \
               -name "*.dart" \
               -o \
               -name "*.txt" \
-            \) \
+            \
             -print \
             | sort \
             > work/recovered/files.txt
@@ -538,253 +764,4 @@ jobs:
           echo
           echo "Matching recovered functions:"
           cat work/recovered/matching-functions.txt \
-            || true
-
-      # ============================================================
-      # 14. ELF INFORMATION
-      # ============================================================
-      - name: Inspect ELF
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p work/elf
-
-          file work/libapp.so \
-            > work/elf/file.txt \
-            2>&1
-
-          readelf -h \
-            work/libapp.so \
-            > work/elf/header.txt \
-            2>&1
-
-          readelf -S \
-            work/libapp.so \
-            > work/elf/sections.txt \
-            2>&1
-
-          readelf -l \
-            work/libapp.so \
-            > work/elf/program-headers.txt \
-            2>&1
-
-          echo "=== FILE ==="
-          cat work/elf/file.txt || true
-
-          echo
-          echo "=== HEADER ==="
-          cat work/elf/header.txt || true
-
-          echo
-          echo "=== SECTIONS ==="
-          cat work/elf/sections.txt || true
-
-      # ============================================================
-      # 15. ARM64 DISASSEMBLY
-      # ============================================================
-      - name: Generate ARM64 disassembly
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p work/disassembly
-
-          objdump \
-            -d \
-            -M no-aliases \
-            work/libapp.so \
-            > work/disassembly/libapp-objdump.txt \
-            2>&1
-
-          echo "objdump status:"
-          echo "$?"
-
-          wc -l \
-            work/disassembly/libapp-objdump.txt \
-            || true
-
-      # ============================================================
-      # 16. SEARCH ALL OUTPUT FOR PAINTER FUNCTIONS
-      # ============================================================
-      - name: Deep search recovered output
-        shell: bash
-        run: |
-          set +e
-
-          PATTERN="_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn|TorchService"
-
-          grep -RniE \
-            "$PATTERN" \
-            work \
-            > work/search/all-matches.txt \
-            2>&1 \
-            || true
-
-          echo
-          echo "============================================================"
-          echo "ALL MATCHES"
-          echo "============================================================"
-
-          cat work/search/all-matches.txt \
-            || true
-
-      # ============================================================
-      # 17. COPY FLUTTER ASSETS
-      # ============================================================
-      - name: Extract Flutter assets
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p work/assets
-
-          while IFS= read -r APK; do
-
-            [ -z "$APK" ] && continue
-
-            NAME="$(basename "$APK" .apk)"
-
-            mkdir -p \
-              "work/assets/$NAME"
-
-            unzip \
-              -q \
-              -o \
-              "$APK" \
-              "assets/flutter_assets/assets/*" \
-              -d \
-              "work/assets/$NAME" \
-              2>/dev/null \
-              || true
-
-          done < work/apk-list.txt
-
-          find work/assets \
-            -type f \
-            -printf "%p %s bytes\n" \
-            | sort \
-            > work/assets/list.txt
-
-          cat work/assets/list.txt
-
-      # ============================================================
-      # 18. FINAL SUMMARY
-      # ============================================================
-      - name: Create final summary
-        shell: bash
-        run: |
-          set +e
-
-          mkdir -p work/final
-
-          {
-            echo "============================================================"
-            echo "FLASHFY AOT ANALYSIS"
-            echo "============================================================"
-            echo
-
-            echo "Snapshot hash:"
-            cat work/snapshot-hash.txt \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "libapp SHA256:"
-            cat work/libapp.sha256 \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "ADAPTER INSTALL"
-            echo "============================================================"
-
-            cat work/adapter/install.txt \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "ADAPTER LIST"
-            echo "============================================================"
-
-            cat work/adapter/list.txt \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "FLUTTERDEC INFO"
-            echo "============================================================"
-
-            cat work/info/info-after-adapter.json \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "DECOMPILE LOG"
-            echo "============================================================"
-
-            cat work/flutterdec-out/decompile.log \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "RECOVERED PAINTER FUNCTIONS"
-            echo "============================================================"
-
-            cat work/recovered/matching-functions.txt \
-              2>/dev/null \
-              || true
-
-            echo
-
-            echo "============================================================"
-            echo "SEARCH RESULTS"
-            echo "============================================================"
-
-            cat work/search/all-matches.txt \
-              2>/dev/null \
-              || true
-
-          } > work/final/FINAL-SUMMARY.txt
-
-          cat work/final/FINAL-SUMMARY.txt
-
-      # ============================================================
-      # 19. UPLOAD COMPLETE RAW ANALYSIS
-      # ============================================================
-      - name: Upload complete AOT analysis
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlashFy-AOT-Raw-Analysis
-          path: work
-          if-no-files-found: warn
-          retention-days: 14
-
-      # ============================================================
-      # 20. UPLOAD DIAGNOSTICS
-      # ============================================================
-      - name: Upload diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlashFy-AOT-Diagnostics
-          path: |
-            work/final/FINAL-SUMMARY.txt
-            work/search/painter-search.txt
-            work/search/all-matches.txt
-            work/recovered/matching-functions.txt
-            work/flutterdec-out/report.json
-            work/flutterdec-out/quality.json
-            work/flutterdec-out/decompile.log
-          if-no-files-found: warn
-          retention-days: 14
+           
