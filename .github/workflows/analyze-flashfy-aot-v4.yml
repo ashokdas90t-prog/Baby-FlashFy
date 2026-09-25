@@ -729,13 +729,13 @@ jobs:
 
           find work/flutterdec-out \
             -type f \
-            \
+            \( \
               -name "*.dartpseudo" \
               -o \
               -name "*.dart" \
               -o \
               -name "*.txt" \
-            \
+            \) \
             -print \
             | sort \
             > work/recovered/files.txt
@@ -764,4 +764,308 @@ jobs:
           echo
           echo "Matching recovered functions:"
           cat work/recovered/matching-functions.txt \
-           
+            || true
+
+      # ============================================================
+      # 15. INSPECT ELF
+      # ============================================================
+      - name: Inspect ELF
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/elf
+
+          file \
+            work/libapp.so \
+            > work/elf/file.txt \
+            2>&1
+
+          readelf \
+            -h \
+            work/libapp.so \
+            > work/elf/header.txt \
+            2>&1
+
+          readelf \
+            -S \
+            work/libapp.so \
+            > work/elf/sections.txt \
+            2>&1
+
+          readelf \
+            -l \
+            work/libapp.so \
+            > work/elf/program-headers.txt \
+            2>&1
+
+          echo "=== FILE ==="
+          cat work/elf/file.txt || true
+
+          echo
+          echo "=== HEADER ==="
+          cat work/elf/header.txt || true
+
+          echo
+          echo "=== SECTIONS ==="
+          cat work/elf/sections.txt || true
+
+      # ============================================================
+      # 16. GENERATE ARM64 DISASSEMBLY
+      # ============================================================
+      - name: Generate ARM64 disassembly
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/disassembly
+
+          objdump \
+            -d \
+            -M no-aliases \
+            work/libapp.so \
+            > work/disassembly/libapp-objdump.txt \
+            2>&1
+
+          STATUS=$?
+
+          echo "objdump status:"
+          echo "$STATUS"
+
+          wc -l \
+            work/disassembly/libapp-objdump.txt \
+            || true
+
+      # ============================================================
+      # 17. DEEP SEARCH ALL OUTPUT
+      # ============================================================
+      - name: Deep search recovered output
+        shell: bash
+        run: |
+          set +e
+
+          PATTERN="_RopeBulbPainter|_drawBulb|_drawPullRope|_BackgroundPainter|_paintBackgroundImage|_paintBackgroundColor|_drawImageScaledAndCentered|_FlashfyScreenState|FlashfyScreen|FlashfyController|toggleFlash|isFlashOn|TorchService"
+
+          grep -RniE \
+            "$PATTERN" \
+            work \
+            > work/search/all-matches.txt \
+            2>&1 \
+            || true
+
+          echo
+          echo "============================================================"
+          echo "ALL MATCHES"
+          echo "============================================================"
+
+          cat work/search/all-matches.txt \
+            || true
+
+      # ============================================================
+      # 18. EXTRACT FLUTTER ASSETS
+      # ============================================================
+      - name: Extract Flutter assets
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/assets
+
+          while IFS= read -r APK; do
+
+            [ -z "$APK" ] && continue
+
+            NAME="$(basename "$APK" .apk)"
+
+            mkdir -p \
+              "work/assets/$NAME"
+
+            unzip \
+              -q \
+              -o \
+              "$APK" \
+              "assets/flutter_assets/assets/*" \
+              -d \
+              "work/assets/$NAME" \
+              2>/dev/null \
+              || true
+
+          done < work/apk-list.txt
+
+          find work/assets \
+            -type f \
+            -printf "%p %s bytes\n" \
+            | sort \
+            > work/assets/list.txt
+
+          cat work/assets/list.txt
+
+      # ============================================================
+      # 19. FINAL SUMMARY
+      # ============================================================
+      - name: Create final summary
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p work/final
+
+          {
+            echo "============================================================"
+            echo "FLASHFY AOT ANALYSIS"
+            echo "============================================================"
+            echo
+
+            echo "Snapshot hash:"
+            cat work/snapshot-hash.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "libapp SHA256:"
+            cat work/libapp.sha256 \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER REGISTRY MATCH"
+            echo "============================================================"
+
+            cat work/adapter/registry-match.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER INSTALL STDOUT"
+            echo "============================================================"
+
+            cat work/adapter/install.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER INSTALL STDERR"
+            echo "============================================================"
+
+            cat work/adapter/install.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER LIST BEFORE"
+            echo "============================================================"
+
+            cat work/adapter/list-before.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "ADAPTER LIST AFTER"
+            echo "============================================================"
+
+            cat work/adapter/list-after.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "FLUTTERDEC INFO AFTER ADAPTER"
+            echo "============================================================"
+
+            cat work/info/info-after-adapter.json \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "FLUTTERDEC INFO STDERR"
+            echo "============================================================"
+
+            cat work/info/info-after-adapter.stderr \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "DECOMPILE LOG"
+            echo "============================================================"
+
+            cat work/flutterdec-out/decompile.log \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "RECOVERED PAINTER FUNCTIONS"
+            echo "============================================================"
+
+            cat work/recovered/matching-functions.txt \
+              2>/dev/null \
+              || true
+
+            echo
+
+            echo "============================================================"
+            echo "SEARCH RESULTS"
+            echo "============================================================"
+
+            cat work/search/all-matches.txt \
+              2>/dev/null \
+              || true
+
+          } > work/final/FINAL-SUMMARY.txt
+
+          cat work/final/FINAL-SUMMARY.txt
+
+      # ============================================================
+      # 20. UPLOAD COMPLETE AOT ANALYSIS
+      # ============================================================
+      - name: Upload complete AOT analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-Raw-Analysis
+          path: work
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ============================================================
+      # 21. UPLOAD DIAGNOSTICS
+      # ============================================================
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashFy-AOT-Diagnostics
+          path: |
+            work/final/FINAL-SUMMARY.txt
+            work/search/painter-search.txt
+            work/search/all-matches.txt
+            work/recovered/matching-functions.txt
+            work/adapter/registry-match.txt
+            work/adapter/install.json
+            work/adapter/install.txt
+            work/adapter/list-before.json
+            work/adapter/list-after.json
+            work/info/info.json
+            work/info/info.stderr
+            work/info/info-after-adapter.json
+            work/info/info-after-adapter.stderr
+            work/flutterdec-out/report.json
+            work/flutterdec-out/quality.json
+            work/flutterdec-out/decompile.log
+          if-no-files-found: warn
+          retention-days: 14
